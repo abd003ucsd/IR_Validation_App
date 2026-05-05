@@ -28,3 +28,5 @@ test_*.py
 .gemini/
 MEMORY.md
 docs/
+AGENT.md
+prompts/
