@@ -1,0 +1,30 @@
+# Python / Environment
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# IDE / Editor
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Testing / Analysis Caches
+.pytest_cache/
+.mypy_cache/
+
+# Local Configuration / Secrets
+.env
+.env.*
+
+# Generated Data / Outputs
+*.csv
+!test data/*.csv  # Keeping existing test data if needed; remove this line if you want to ignore ALL CSVs
+
+# Temporary / Agent Workflow Files
+*.tmp
+temp/
+test_*.py
+.gemini/
+MEMORY.md
+docs/

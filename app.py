@@ -1,0 +1,2521 @@
+"""
+IR Data Validation Tool — Streamlit Application (v1)
+
+A web interface for non-technical IR colleagues at UC San Diego to compare
+data sources across multiple formats using three validation approaches.
+Supports intelligent column matching (fuzzy or Ollama-based).
+
+Requirements:
+- Python 3.10.9+
+- Streamlit, pandas, thefuzz, python-Levenshtein, tabula-py, openpyxl
+- Optional: ollama with nomic-embed-text model for enhanced matching
+- validation_utils.py in the same directory
+
+Supported file formats:
+- Excel: .xlsx, .xls (with sheet selection)
+- Delimited: .csv, .tsv, .txt (auto-delimiter detection)
+- Data: .json, .parquet
+- PDF: .pdf (with table selection)
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import uuid
+from io import BytesIO
+import tempfile
+import os
+from datetime import datetime
+from sqlalchemy import create_engine
+from typing import Optional, Dict, List, Tuple, Union
+
+# External libraries for matching and file I/O
+from thefuzz import process as fuzz_process
+
+# Import validation functions from local module
+from validation_utils import (
+    validate_data,
+    compare_records,
+    compare_composite_records,
+    coerce_columns,
+    try_convert_numeric
+)
+
+# ============================================================
+# DATABASE PRESETS
+# ============================================================
+
+IR_DB_PRESETS = {
+    "IR": "IR",
+    "IR_DW": "IR_DW",
+    "IR_DW_dev": "IR_DW_dev",
+    "IR_STAGING": "IR_STAGING"
+}
+
+DEFAULT_SERVER = "EVC-SQL14.ucsd.edu, 65108"
+
+
+def run_db_query(
+    server: str,
+    database: str,
+    query: str,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    use_windows_auth: bool = True
+) -> pd.DataFrame:
+    """
+    Execute a SQL query and return a DataFrame.
+    Supports Windows and SQL Authentication.
+    """
+    if use_windows_auth:
+        conn_str = (
+            f"mssql+pyodbc://@{server}/{database}"
+            "?trusted_connection=yes&driver=ODBC+Driver+17+for+SQL+Server"
+        )
+    else:
+        conn_str = (
+            f"mssql+pyodbc://{username}:{password}@{server}/{database}"
+            "?driver=ODBC+Driver+17+for+SQL+Server"
+        )
+
+    # Use a short timeout for the connection attempt
+    engine = create_engine(conn_str, connect_args={'timeout': 10})
+    
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql_query(query, conn)
+        return df
+    finally:
+        engine.dispose()
+
+
+# ============================================================
+# UCOP GAD PRESET
+# ============================================================
+
+UCOP_GAD_PRESET = {
+    "names": [
+        "Record Type Code", "Campus Code",
+        "Identification Number", "Year Applied For",
+        "Quarter Applied For", "Date of Birth", "Gender",
+        "Ethnic Origin Code", "Citizenship Status Code",
+        "College Proposed Code 1", "College Proposed Code 2",
+        "College Proposed Code 3", "Major Proposed Code 1",
+        "Major Proposed Code 2", "Major Proposed Code 3",
+        "Degree Program Code 1", "Degree Program Code 2",
+        "Degree Program Code 3", "Graduate Admit Code",
+        "Cancelled Application Code",
+        "Institution Awarding UG Degree",
+        "Date UG Degree Awarded", "Ethnic IPEDS Hispanic",
+        "Ethnic IPEDS African", "Ethnic IPEDS AmInd",
+        "Ethnic IPEDS Asian", "Ethnic IPEDS Pacific",
+        "Ethnic IPEDS White", "Ethnic UC African American",
+        "Ethnic UC Am Indian AK Native", "Ethnic UC Chinese",
+        "Ethnic UC East Indian", "Ethnic UC Filipino",
+        "Ethnic UC Japanese", "Ethnic UC Korean",
+        "Ethnic UC Vietnamese", "Ethnic UC Other Asian",
+        "Ethnic UC Mexican Chicano",
+        "Ethnic UC Other Hispanic Latino",
+        "Ethnic UC Hawaiian Pac Islander",
+        "Ethnic UC White European", "Ethnic UC Other",
+        "Military Service Status", "Applicant Name",
+        "Institution Awarding UG Degree 2",
+        "Date UG Degree Awarded 2",
+        "Institution Awarding Masters Degree",
+        "Date Masters Degree Awarded",
+        "Institution Awarding Masters Degree 2",
+        "Date Masters Degree Awarded 2",
+        "California Community College Attended",
+        "California Community College Experience",
+        "Gender Expression", "Gender Identity",
+        "Sexual Orientation", "Sexual Orientation Specify",
+        "Parent Guardian 1 Education Level",
+        "Parent Guardian 2 Education Level"
+    ],
+    "colspecs": [
+        (0,1),(1,3),(3,13),(13,15),(15,16),(16,22),(22,23),
+        (23,24),(24,26),(26,28),(28,30),(30,32),(32,35),
+        (35,38),(38,41),(41,43),(43,45),(45,47),(47,48),
+        (48,49),(49,55),(55,57),(57,58),(58,59),(59,60),
+        (60,61),(61,62),(62,63),(63,64),(64,65),(65,66),
+        (66,67),(67,68),(68,69),(69,70),(70,71),(71,72),
+        (72,73),(73,74),(74,75),(75,76),(76,77),(77,78),
+        (78,113),(113,119),(119,121),(121,127),(127,129),
+        (129,135),(135,137),(137,143),(143,145),(145,147),
+        (147,149),(149,151),(151,201),(201,202),(202,203)
+    ]
+}
+
+
+# ============================================================
+# SECTION 0: UI & THEMING
+# ============================================================
+
+@st.cache_data
+def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
+    """
+    Returns (global_css, theme_css) as strings.
+    Cached by theme name and zoom level.
+    """
+    zoom = zoom_level / 100.0
+
+    # Global sidebar selectbox fix — theme-aware.
+    sidebar_select_bg = "#182B49" if theme == "UC Navy (Dark)" else \
+                        "#B38F00" if theme == "UC Gold (Light)" else \
+                        "#1e1e1e" if theme == "Standard Dark" else \
+                        "#F0F2F6"
+
+    sidebar_select_text = "#FFCD00" if theme == "UC Navy (Dark)" else \
+                          "#182B49" if theme == "UC Gold (Light)" else \
+                          "#ffffff" if theme == "Standard Dark" else \
+                          "#182B49"
+
+    sidebar_select_svg = sidebar_select_text
+
+    global_css = f"""
+        <style>
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] 
+            div[data-baseweb="select"] > div {{
+            background-color: {sidebar_select_bg} !important;
+            color: {sidebar_select_text} !important;
+            border: 1px solid {sidebar_select_text}44 !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] 
+            div[data-baseweb="select"] svg {{
+            fill: {sidebar_select_svg} !important;
+        }}
+        </style>
+    """
+    
+    # Define colors based on theme
+    if theme == "UC Navy (Dark)":
+        bg = "#182B49"           # UCSD Navy
+        text = "#FFCD00"         # UCSD Gold
+        primary = "#FFCD00"      # Gold buttons
+        secondary_bg = "#003B5C" # Deeper Blue for cards
+        card_text = "#FFCD00"    # Gold for card text
+        border = "#FFCD00"
+        sidebar_bg = "#002135"   
+        sidebar_text = "#FFFFFF"
+        button_text = "#182B49"
+        uploader_bg = "#003B5C"
+    elif theme == "UC Gold (Light)":
+        bg = "#FFCD00"           # UCSD Gold
+        text = "#182B49"         # Dark Navy for contrast
+        primary = "#182B49"      # Navy buttons
+        secondary_bg = "#FFFFFF" # Light background for cards
+        card_text = "#182B49"    # Dark Navy for card text
+        border = "#182B49"
+        sidebar_bg = "#B38F00"   
+        sidebar_text = "#000000" # Black for sidebar
+        button_text = "#FFFFFF"
+        uploader_bg = "#F5F5F5"  
+        # FIX 1 — Removed dead variable definitions (segment_bg, segment_text, widget_bg, widget_text)
+    elif theme == "Standard Dark":
+        bg = "#0E1117"
+        text = "#FAFAFA"
+        primary = "#1E88E5"
+        secondary_bg = "#262730"
+        card_text = "#FAFAFA"
+        border = "#444444"
+        sidebar_bg = "#111111"
+        sidebar_text = "#FAFAFA"
+        button_text = "#FFFFFF"
+        uploader_bg = "#262730"
+    else: # Standard Light
+        bg = "#FFFFFF"
+        text = "#182B49"         # Dark Navy for contrast
+        primary = "#FF4B4B"
+        secondary_bg = "#F0F2F6" # Light Gray for cards
+        card_text = "#182B49"    # Dark Navy for card text
+        border = "#E6E6E6"
+        sidebar_bg = "#F0F2F6"
+        sidebar_text = "#182B49" # Dark Navy for sidebar
+        button_text = "#FFFFFF"
+        uploader_bg = "#F0F2F6"
+        # FIX 1 — Removed dead variable definitions (segment_bg, segment_text, widget_bg, widget_text)
+
+    # Define theme-specific overrides for specific widgets
+    segmented_bg = primary
+    segmented_text = button_text
+    dropdown_bg = "#ffffff"
+    dropdown_text = text
+
+    if theme == "UC Gold (Light)":
+        segmented_bg = "#182B49"
+        segmented_text = "#FFCD00"
+        dropdown_bg = "#ffffff"
+        dropdown_text = "#182B49"
+    elif theme == "Standard Dark":
+        dropdown_bg = "#2b2b2b"
+        dropdown_text = "#ffffff"
+    elif theme == "Standard Light":
+        segmented_bg = "#E0E0E0"
+        segmented_text = "#1a1a1a"
+        dropdown_bg = "#ffffff"
+        dropdown_text = "#1a1a1a"
+
+    # Build theme-specific CSS blocks
+    theme_specific_css = ""
+    
+    if theme == "Standard Dark":
+        theme_specific_css = """
+        /* STANDARD DARK THEME-SPECIFIC FIXES */
+        /* Main content selectbox */
+        [data-testid="stSelectbox"] {
+            background: #2b2b2b !important;
+            color: #ffffff !important;
+        }
+        [data-testid="stSelectbox"] * {
+            background: #2b2b2b !important;
+            color: #ffffff !important;
+        }
+        /* Select dropdown styling */
+        [data-baseweb="select"] > div {
+            background: #2b2b2b !important;
+            color: #ffffff !important;
+        }
+        /* Listbox and option dropdowns */
+        div[role="listbox"],
+        div[role="option"],
+        [data-baseweb="listbox"] {
+            background: #2b2b2b !important;
+            color: #ffffff !important;
+        }
+        div[role="listbox"] *,
+        div[role="option"] *,
+        [data-baseweb="listbox"] * {
+            background: #2b2b2b !important;
+            color: #ffffff !important;
+        }
+        """
+    
+    elif theme == "Standard Light":
+        theme_specific_css = """
+        /* STANDARD LIGHT THEME-SPECIFIC FIXES */
+        /* Segmented control full override */
+        [data-testid="stSegmentedControl"] button,
+        [data-testid="stSegmentedControl"] > div > button {
+            background: #1a1a1a !important;
+            color: #ffffff !important;
+        }
+        [data-testid="stSegmentedControl"] button p,
+        [data-testid="stSegmentedControl"] button span,
+        [data-testid="stSegmentedControl"] button div,
+        [data-testid="stSegmentedControl"] button *,
+        [data-testid="stSegmentedControl"] > div > button p,
+        [data-testid="stSegmentedControl"] > div > button span,
+        [data-testid="stSegmentedControl"] > div > button div,
+        [data-testid="stSegmentedControl"] > div > button * {
+            background: #1a1a1a !important;
+            color: #ffffff !important;
+        }
+        [data-testid="stSegmentedControl"] button[aria-pressed="true"],
+        [data-testid="stSegmentedControl"] > div > button[aria-pressed="true"],
+        [data-testid="stSegmentedControl"] button[aria-pressed="true"] *,
+        [data-testid="stSegmentedControl"] > div > button[aria-pressed="true"] * {
+            background: #1a1a1a !important;
+            color: #ffffff !important;
+        }
+        /* STANDARD LIGHT — Force uploader and dropzone to light */
+        [data-testid="stFileUploader"],
+        [data-testid="stFileUploaderDropzone"],
+        [data-testid="stFileUploaderDropzone"] section,
+        [data-testid="stFileUploaderDropzone"] div {
+            background-color: #F0F2F6 !important;
+            color: #182B49 !important;
+        }
+        [data-testid="stFileUploader"] *,
+        [data-testid="stFileUploaderDropzone"] * {
+            color: #182B49 !important;
+        }
+        [data-baseweb="input"] input,
+        [data-baseweb="textarea"] textarea {
+            background-color: #FFFFFF !important;
+            color: #182B49 !important;
+        }
+        [data-testid="stFileUploaderDropzone"] {
+            border: 2px dashed #E6E6E6 !important;
+        }
+        """
+    
+    elif theme == "UC Navy (Dark)":
+        theme_specific_css = """
+        /* UC NAVY THEME-SPECIFIC FIXES */
+        /* UC NAVY — Sidebar selectbox hard override */
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] div[data-baseweb="select"] > div * {
+            background-color: #182B49 !important;
+            color: #FFCD00 !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] div[data-baseweb="select"] svg {
+            fill: #FFCD00 !important;
+        }
+        /* Segmented control buttons - flat style */
+        [data-testid="stSegmentedControl"] button,
+        [data-testid="stSegmentedControl"] > div > button {
+            background: #182B49 !important;
+            color: #FFCD00 !important;
+            border: 1px solid #FFCD00 !important;
+        }
+        /* All child p, span in segmented control */
+        [data-testid="stSegmentedControl"] button p,
+        [data-testid="stSegmentedControl"] button span,
+        [data-testid="stSegmentedControl"] > div > button p,
+        [data-testid="stSegmentedControl"] > div > button span {
+            color: #FFCD00 !important;
+        }
+        /* Active/selected segmented button state */
+        [data-testid="stSegmentedControl"] button[aria-pressed="true"],
+        [data-testid="stSegmentedControl"] > div > button[aria-pressed="true"] {
+            background: #0d1b2e !important;
+            color: #FFCD00 !important;
+        }
+        """
+    
+    elif theme == "UC Gold (Light)":
+        theme_specific_css = """
+        /* UC GOLD THEME-SPECIFIC FIXES */
+        /* SQL Server input */
+        [data-testid="stTextInput"] input {
+            background: #ffffff !important;
+            color: #182B49 !important;
+        }
+        /* SQL Query textarea */
+        [data-testid="stTextArea"] textarea {
+            background: #ffffff !important;
+            color: #182B49 !important;
+        }
+        /* Database selectbox */
+        [data-baseweb="select"] > div {
+            background: #ffffff !important;
+            color: #182B49 !important;
+        }
+        /* UC GOLD — Sidebar label contrast and weight */
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] .stMarkdown p {
+            color: #000000 !important;
+            font-weight: 600 !important;
+        }
+        /* Segmented control buttons */
+        [data-testid="stSegmentedControl"] button,
+        [data-testid="stSegmentedControl"] > div > button {
+            background: #182B49 !important;
+            color: #FFCD00 !important;
+            border: 1px solid #182B49 !important;
+        }
+        /* All child p, span in segmented control */
+        [data-testid="stSegmentedControl"] button p,
+        [data-testid="stSegmentedControl"] button span,
+        [data-testid="stSegmentedControl"] > div > button p,
+        [data-testid="stSegmentedControl"] > div > button span {
+            color: #FFCD00 !important;
+        }
+        /* UC GOLD — Force uploader and dropzone to light background */
+        [data-testid="stFileUploader"],
+        [data-testid="stFileUploaderDropzone"],
+        [data-testid="stFileUploaderDropzone"] section,
+        [data-testid="stFileUploaderDropzone"] div {
+            background-color: #F5F5F5 !important;
+            color: #182B49 !important;
+        }
+        [data-testid="stFileUploader"] *,
+        [data-testid="stFileUploaderDropzone"] * {
+            color: #182B49 !important;
+        }
+        [data-testid="stFileUploaderDropzone"] {
+            border: 2px dashed #182B49 !important;
+        }
+        """
+
+    # Aggressive CSS injection to override Streamlit defaults and fix contrast
+    theme_css = f"""
+    <style>
+        /* Global Scale and Backgrounds */
+        html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"], .main {{
+            background-color: {bg} !important;
+            color: {text} !important;
+        }}
+        
+        .block-container,
+        .stMarkdown, label, p, span, caption {{
+            font-size: {zoom}rem !important;
+        }}
+
+        .block-container {{
+            background-color: {bg} !important;
+        }}
+        
+        /* Sidebar Overrides */
+        [data-testid="stSidebar"] {{
+            background-color: {sidebar_bg} !important;
+            border-right: 1px solid {border}44 !important;
+        }}
+        [data-testid="stSidebar"] * {{
+            color: {sidebar_text} !important;
+        }}
+
+        /* FIX 3 — Sidebar selectbox carve-out */
+        /* Carve-out: sidebar selectbox must not inherit sidebar_text */
+        section[data-testid="stSidebar"] 
+            [data-testid="stSelectbox"] 
+            div[data-baseweb="select"] > div {{
+            background-color: {sidebar_select_bg} !important;
+            color: {sidebar_select_text} !important;
+        }}
+        section[data-testid="stSidebar"] 
+            [data-testid="stSelectbox"] 
+            div[data-baseweb="select"] svg {{
+            fill: {sidebar_select_text} !important;
+        }}
+
+        /* Sidebar Button Symbols (Blue) */
+        [data-testid="stSidebar"] .stButton>button {{
+            color: #0000FF !important;
+        }}
+        [data-testid="stSidebar"] .stButton>button p {{
+            color: #0000FF !important;
+        }}
+        
+        /* Text and Markdown Global */
+        h1, h2, h3, h4, h5, h6, p, span, label, .stMarkdown, [data-testid="stMarkdownContainer"] p {{
+            color: {text} !important;
+        }}
+        
+        /* Interactive Elements */
+        .stButton>button, .stButton>button:hover, .stButton>button:active {{
+            background-color: {primary} !important;
+            color: {button_text} !important;
+            border: 1px solid {border}44 !important;
+            border-radius: 4px !important;
+            font-weight: 700 !important;
+        }}
+        .stButton>button p {{
+            color: {button_text} !important;
+        }}
+        
+        /* ISSUE 1 — Segmented Control Buttons */
+        [data-testid="stSegmentedControl"] {{
+            background-color: transparent !important;
+        }}
+        [data-testid="stSegmentedControl"] button {{
+            background-color: {segmented_bg} !important;
+            color: {segmented_text} !important;
+            border: 1px solid {segmented_bg} !important;
+        }}
+        [data-testid="stSegmentedControl"] button *,
+        [data-testid="stSegmentedControl"] button p,
+        [data-testid="stSegmentedControl"] button span {{
+            background-color: {segmented_bg} !important;
+            color: {segmented_text} !important;
+        }}
+
+        /* Dashboard Cards */
+        .dashboard-card {{
+            text-align: center !important;
+            padding: 1.5rem !important;
+            border: 2px solid {border} !important;
+            border-radius: 1rem !important;
+            background-color: {secondary_bg} !important;
+            color: {card_text} !important;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
+            margin-bottom: 1rem !important;
+        }}
+        /* Target all text inside cards to ensure contrast */
+        .dashboard-card *, .dashboard-card div, .dashboard-card p, .dashboard-card span {{
+            color: {card_text} !important;
+        }}
+        .dashboard-card-label {{
+            font-size: 0.85rem !important;
+            color: {card_text} !important;
+            font-weight: 800 !important;
+            margin-bottom: 0.75rem !important;
+            text-transform: uppercase !important;
+            letter-spacing: 0.1em !important;
+        }}
+        
+        /* Metric Styling */
+        [data-testid="stMetric"] {{
+            background-color: {secondary_bg} !important;
+            padding: 1rem !important;
+            border-radius: 0.5rem !important;
+            border: 2px solid {border} !important;
+        }}
+        [data-testid="stMetricValue"] > div {{ color: {card_text} !important; }}
+        [data-testid="stMetricLabel"] > div {{ color: {card_text} !important; font-weight: 600 !important; }}
+        
+        /* FIX 2 — Nuclear widget block (select removed) */
+        /* WIDGET & UPLOADER CONTRAST FIX (AGGRESSIVE) */
+        /* Target the container, the dropzone, and all internal sections */
+        [data-testid="stFileUploader"],
+        div[data-testid="stFileUploader"] > div,
+        [data-testid="stFileUploaderDropzone"], 
+        div[data-testid="stFileUploaderDropzone"] > div,
+        [data-testid="stFileUploaderDropzone"] section,
+        div[data-testid="stFileUploaderDropzone"] > section,
+        [data-testid="stFileUploaderDropzone"] div,
+        [data-baseweb="input"],
+        [data-baseweb="textarea"] {{
+            background-color: {uploader_bg} !important;
+            color: {text} !important;
+            border-color: {border}44 !important;
+        }}
+
+        /* Force all text inside these widgets to the correct contrast color */
+        [data-testid="stFileUploader"] *,
+        [data-testid="stFileUploaderDropzone"] *,
+        [data-baseweb="input"] *,
+        [data-baseweb="textarea"] * {{
+            color: {text} !important;
+        }}
+
+        /* ISSUE 2 — Sidebar Select/Dropdown (Solid Box Fix) */
+        [data-testid="stSelectbox"] > div,
+        [data-testid="stSelectbox"] > div *, 
+        [data-testid="stSelectbox"] div[role="combobox"],
+        [data-testid="stSelectbox"] div[role="combobox"] * {{
+            background-color: {dropdown_bg} !important;
+            color: {dropdown_text} !important;
+        }}
+
+        /* Specific fix for file uploader border and labels */
+        [data-testid="stFileUploaderDropzone"] {{
+            border: 2px dashed {border} !important;
+        }}
+        
+        /* Interactive Buttons Contrast Reinforcement */
+        .stButton>button, .stButton>button p, .stButton>button span {{
+            color: {button_text} !important;
+            font-weight: 800 !important;
+        }}
+        
+        /* Dataframes and Tables */
+        .stDataFrame, [data-testid="stTable"], [data-testid="stDataFrame"] {{ 
+            background-color: {secondary_bg} !important;
+            border: 1px solid {border}44 !important;
+        }}
+
+        {theme_specific_css}
+    </style>
+    """
+    return global_css, theme_css
+
+
+# FIX 2 — app.py: Cache CSS string to prevent rebuild on every rerun (PERFORMANCE)
+def apply_custom_theme():
+    """Inject optimized custom CSS based on theme and zoom level."""
+    theme = st.session_state.get("theme", "UC Navy (Dark)")
+    zoom = st.session_state.get("zoom", 100)
+    global_css, theme_css = build_theme_css(theme, zoom)
+    st.markdown(global_css, unsafe_allow_html=True)
+    st.markdown(theme_css, unsafe_allow_html=True)
+
+
+# ============================================================
+# SECTION 1: FILE LOADER
+# ============================================================
+
+def load_file(uploaded_file) -> Optional[pd.DataFrame]:
+    """
+    Load a file in multiple formats and return a DataFrame.
+    
+    Supports: .xlsx, .xls, .csv, .tsv, .txt (auto-delimiter),
+    .json, .parquet, .pdf (with table selection)
+    
+    Parameters
+    ----------
+    uploaded_file : streamlit.UploadedFile
+        File uploaded via st.file_uploader()
+    
+    Returns
+    -------
+    Optional[pd.DataFrame]
+        Loaded DataFrame or None if loading fails
+    """
+    if uploaded_file is None:
+        return None
+
+    filename = uploaded_file.name.lower()
+
+    def finalize(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        if df is None:
+            return None
+
+        df.columns = df.columns.astype(str).str.strip()
+
+        if df.columns.duplicated().any():
+            dupes = list(df.columns[df.duplicated()])
+            st.error(f"Duplicate column names found: {dupes}. Please fix before uploading.")
+            return None
+
+        null_cols = df.columns[df.isna().all()].tolist()
+        if null_cols:
+            df = df.drop(columns=null_cols)
+            st.caption(f"Dropped fully empty columns: {null_cols}")
+
+        if df.columns.str.match(r'^Unnamed').mean() > 0.5:
+            st.warning(
+                "File may be missing a header row — first row was used as headers. "
+                "If results look wrong, add a header row to your file."
+            )
+
+        return df
+
+    try:
+        # === EXCEL FILES ===
+        if filename.endswith(('.xlsx', '.xls')):
+            with pd.ExcelFile(uploaded_file) as xls:
+                sheet_names = xls.sheet_names
+                
+                if len(sheet_names) > 1:
+                    selected_sheet = st.selectbox(
+                        "Select sheet",
+                        sheet_names,
+                        key=f"sheet_select_{uploaded_file.file_id}"
+                    )
+                    df = pd.read_excel(xls, sheet_name=selected_sheet)
+                else:
+                    df = pd.read_excel(xls)
+
+        # === CSV FILES ===
+        elif filename.endswith('.csv'):
+            uploaded_file.seek(0)
+            try:
+                df = pd.read_csv(uploaded_file, encoding='utf-8', low_memory=False)
+            except UnicodeDecodeError:
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, encoding='latin-1', low_memory=False)
+                st.caption("Non-UTF-8 encoding detected — loaded with latin-1")
+
+        # === TSV FILES ===
+        elif filename.endswith('.tsv'):
+            uploaded_file.seek(0)
+            try:
+                df = pd.read_csv(uploaded_file, sep='\t', encoding='utf-8', low_memory=False)
+            except UnicodeDecodeError:
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, sep='\t', encoding='latin-1', low_memory=False)
+                st.caption("Non-UTF-8 encoding detected — loaded with latin-1")
+
+        # === TAB-DELIMITED / GENERIC TEXT ===
+        elif filename.endswith('.txt'):
+            st.caption("Text file options")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                header_row = st.number_input(
+                    "Header row",
+                    min_value=0, max_value=20, value=0, step=1,
+                    help="0 = first row is header. Increase if file has title rows above column names.",
+                    key=f"txt_header_{uploaded_file.name}"
+                )
+            
+            with col2:
+                skip_footer = st.number_input(
+                    "Rows to skip at bottom",
+                    min_value=0, max_value=20, value=0, step=1,
+                    help="Skip summary or total rows at the end of the file.",
+                    key=f"txt_footer_{uploaded_file.name}"
+                )
+            
+            with col3:
+                locale_opt = st.selectbox(
+                    "Decimal Locale",
+                    ["US (1.5)", "EU (1,5)"],
+                    key=f"txt_locale_{uploaded_file.name}"
+                )
+                decimal_sep = "." if "US" in locale_opt else ","
+                thousands_sep = "," if "US" in locale_opt else "."
+
+            col_type_hint = st.selectbox(
+                "Column type hint",
+                ["Auto-detect", "All text", "All numeric"],
+                help="Force all columns to a type if auto-detection guesses wrong.",
+                key=f"txt_dtype_{uploaded_file.name}"
+            )
+            
+            dtype_map = {
+                "Auto-detect": None,
+                "All text": str,
+                "All numeric": float
+            }
+            
+            # Smart Header Detection
+            if st.checkbox("Enable Smart Header Search", value=False, key=f"smart_hdr_{uploaded_file.name}"):
+                uploaded_file.seek(0)
+                sample = pd.read_csv(uploaded_file, nrows=10, header=None, sep=None, engine='python')
+                # Find row with max non-nulls
+                header_row = int(sample.notna().sum(axis=1).idxmax())
+                st.caption(f"Suggested header row: {header_row}")
+            
+            df = None
+            for delimiter in ['\t', ',', '|']:
+                try:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(
+                        uploaded_file,
+                        sep=delimiter,
+                        encoding='utf-8',
+                        header=header_row,
+                        skipfooter=skip_footer,
+                        decimal=decimal_sep,
+                        thousands=thousands_sep,
+                        dtype=dtype_map[col_type_hint],
+                        engine='python'
+                    )
+                    if len(df.columns) > 1:
+                        break
+                except UnicodeDecodeError:
+                    try:
+                        uploaded_file.seek(0)
+                        df = pd.read_csv(
+                            uploaded_file,
+                            sep=delimiter,
+                            encoding='latin-1',
+                            header=header_row,
+                            skipfooter=skip_footer,
+                            dtype=dtype_map[col_type_hint],
+                            engine='python'
+                        )
+                        st.caption("Non-UTF-8 encoding detected — loaded with latin-1")
+                        if len(df.columns) > 1:
+                            break
+                    except UnicodeDecodeError:
+                        df = None
+                except Exception:
+                    df = None
+
+            if df is None or len(df.columns) <= 1:
+                # ADDITION 5: Fixed-width fallback
+                with st.expander("Try Fixed-Width Parser"):
+                    # STEP 1: UCOP GAD Preset Button
+                    if st.button("Load UCOP GAD Layout (Fall 2021)", key=f"ucop_preset_{uploaded_file.name}"):
+                        preset_names = ", ".join(UCOP_GAD_PRESET["names"])
+                        preset_positions = ", ".join(
+                            [f"{s}:{e}" for s, e in UCOP_GAD_PRESET["colspecs"]]
+                        )
+                        # Set the WIDGET keys directly — not a separate preset key
+                        st.session_state[f"fwf_names_{uploaded_file.name}"] = preset_names
+                        st.session_state[f"fwf_positions_{uploaded_file.name}"] = preset_positions
+                        st.session_state.fwf_preset_loaded = True
+                        st.rerun()
+                    
+                    if st.session_state.get("fwf_preset_loaded", False):
+                        st.caption("UCOP GAD layout loaded — 58 fields, 203 bytes")
+                    
+                    # STEP 2: Manual input fields
+                    col_names_input = st.text_area(
+                        "Column names (comma-separated)",
+                        key=f"fwf_names_{uploaded_file.name}",
+                        help="Example: Record Type, Campus Code, Student ID"
+                    )
+                    
+                    col_positions_input = st.text_area(
+                        "Column positions (start:end pairs, comma-separated)",
+                        key=f"fwf_positions_{uploaded_file.name}",
+                        help="start = LOC - 1, end = LOC + LN - 1. Example: 0:1, 1:3, 3:13"
+                    )
+                    
+                    st.caption(
+                        "LOC and LN from your layout spec: "
+                        "start = LOC - 1, end = LOC + LN - 1"
+                    )
+                    
+                    # STEP 3: Parse button
+                    if st.button("Parse Fixed-Width File", key=f"parse_fwf_{uploaded_file.name}"):
+                        # Guard: block parse if either field is empty
+                        if not col_names_input.strip() or not col_positions_input.strip():
+                            st.warning(
+                                "Please load a preset or enter column names "
+                                "and positions before parsing."
+                            )
+                            return None
+                        
+                        try:
+                            col_names = [
+                                n.strip() for n in col_names_input.split(",")
+                                if n.strip()  # skip empty tokens
+                            ]
+                            colspecs = [
+                                (int(p.split(":")[0].strip()), int(p.split(":")[1].strip()))
+                                for p in col_positions_input.split(",")
+                                if p.strip()  # skip empty tokens
+                            ]
+                            
+                            if len(col_names) != len(colspecs):
+                                st.error(
+                                    f"Column names ({len(col_names)}) and positions "
+                                    f"({len(colspecs)}) count must match."
+                                )
+                                return None
+                            
+                            uploaded_file.seek(0)
+                            df = pd.read_fwf(
+                                uploaded_file,
+                                colspecs=colspecs,
+                                names=col_names,
+                                header=None,
+                                dtype=str
+                            )
+                            return finalize(df)
+                        
+                        except Exception as e:
+                            st.error(f"Parse failed: {str(e)}")
+                            return None
+                    else:
+                        # STEP 4: Guard — expander shown but parse not clicked
+                        return None
+                
+                # Fallback delimited read if fixed-width not used
+                if df is None:
+                    uploaded_file.seek(0)
+                    try:
+                        df = pd.read_csv(
+                            uploaded_file,
+                            encoding='utf-8',
+                            header=header_row,
+                            skipfooter=skip_footer,
+                            dtype=dtype_map[col_type_hint],
+                            engine='python'
+                        )
+                    except UnicodeDecodeError:
+                        uploaded_file.seek(0)
+                        df = pd.read_csv(
+                            uploaded_file,
+                            encoding='latin-1',
+                            header=header_row,
+                            skipfooter=skip_footer,
+                            dtype=dtype_map[col_type_hint],
+                            engine='python'
+                        )
+                        st.caption("Non-UTF-8 encoding detected — loaded with latin-1")
+
+        # === JSON FILES ===
+        elif filename.endswith('.json'):
+            df = pd.read_json(uploaded_file)
+
+        # === PARQUET FILES ===
+        elif filename.endswith('.parquet'):
+            df = pd.read_parquet(uploaded_file)
+
+        # === PDF FILES ===
+        elif filename.endswith('.pdf'):
+            import tabula
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+                tmp.write(uploaded_file.read())
+                tmp_path = tmp.name
+            
+            try:
+                tables = tabula.read_pdf(tmp_path, pages='all', multiple_tables=True)
+                
+                if not tables:
+                    st.error("No tables found in PDF")
+                    return None
+                
+                if len(tables) > 1:
+                    table_idx = st.selectbox(
+                        "Select table",
+                        range(len(tables)),
+                        format_func=lambda i: f"Table {i+1} ({len(tables[i])} rows)",
+                        key=f"pdf_table_select_{uploaded_file.file_id}"
+                    )
+                    df = tables[table_idx]
+                else:
+                    df = tables[0]
+            finally:
+                os.unlink(tmp_path)
+
+        else:
+            st.error(f"Unsupported file format: {filename}")
+            return None
+    except Exception as e:
+        st.error(f"Error loading file: {str(e)}")
+        return None
+
+    return finalize(df)
+
+
+# ============================================================
+# SECTION 2: COLUMN MATCHERS
+# ============================================================
+
+@st.cache_data
+def get_embedding(text: str) -> Optional[List[float]]:
+    """
+    Get embedding for text using Ollama's nomic-embed-text model.
+    Returns a list to avoid numpy serialization issues in Streamlit caching.
+    """
+    try:
+        import ollama
+        response = ollama.embeddings(model="nomic-embed-text", prompt=text)
+        return [float(x) for x in response["embedding"]]
+    except Exception:
+        return None
+
+
+def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
+    """
+    Compute cosine similarity between two vectors.
+    """
+    dot = np.dot(vec1, vec2)
+    norm1 = np.linalg.norm(vec1)
+    norm2 = np.linalg.norm(vec2)
+    
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    
+    return dot / (norm1 * norm2)
+
+
+@st.cache_data
+def suggest_fuzzy_matches(
+    cols1: List[str],
+    cols2: List[str],
+    threshold: int = 60
+) -> Dict[str, Tuple[str, int]]:
+    """
+    Suggest column matches using fuzzy string matching.
+    Returns Dict[col_a, (col_b, score)].
+    """
+    matches = {}
+    for col1 in cols1:
+        # Exact match priority
+        if col1 in cols2:
+            matches[col1] = (col1, 100)
+            continue
+            
+        # Case-insensitive exact match
+        cols2_lower = [c.lower() for c in cols2]
+        if col1.lower() in cols2_lower:
+            idx = cols2_lower.index(col1.lower())
+            matches[col1] = (cols2[idx], 99)
+            continue
+
+        best_match, score = fuzz_process.extractOne(col1, cols2)
+        if score >= threshold:
+            matches[col1] = (best_match, score)
+    
+    return matches
+
+
+@st.cache_data
+def suggest_ollama_matches(
+    cols1: List[str],
+    cols2: List[str],
+    threshold: float = 0.75
+) -> Dict[str, Tuple[str, float]]:
+    """
+    Suggest column matches using Ollama embeddings and cosine similarity.
+    Returns Dict[col_a, (col_b, score)].
+    """
+    try:
+        import ollama
+        # Embed all columns
+        embeddings_1 = {col: np.array(get_embedding(col)) for col in cols1}
+        embeddings_2 = {col: np.array(get_embedding(col)) for col in cols2}
+        
+        # Filter out failed embeddings
+        embeddings_1 = {k: v for k, v in embeddings_1.items() if v is not None and v.size > 0}
+        embeddings_2 = {k: v for k, v in embeddings_2.items() if v is not None and v.size > 0}
+        
+        if not embeddings_1 or not embeddings_2:
+            return {}
+        
+        matches = {}
+        for col1, emb1 in embeddings_1.items():
+            best_col2 = None
+            best_score = 0.0
+            
+            for col2, emb2 in embeddings_2.items():
+                score = cosine_similarity(emb1, emb2)
+                if score > best_score:
+                    best_score = score
+                    best_col2 = col2
+            
+            if best_score >= threshold:
+                matches[col1] = (best_col2, best_score)
+        
+        return matches
+    except Exception:
+        return {}
+
+
+def suggest_matches(
+    cols1: List[str],
+    cols2: List[str],
+    matcher: str = "thefuzz",
+    threshold: Optional[Union[int, float]] = None
+) -> Dict[str, str]:
+    """
+    Unified interface for column matching with hybrid logic and deduplication.
+    """
+    # 1. Start with high-confidence fuzzy matching (covers exact matches too)
+    # Use a high threshold (85) for "sure" string matches
+    initial_matches = suggest_fuzzy_matches(cols1, cols2, threshold=85)
+    
+    # Store with scores for deduplication: col_b -> (col_a, score)
+    b_to_a_best: Dict[str, Tuple[str, float]] = {}
+    
+    for col_a, (col_b, score) in initial_matches.items():
+        if col_b not in b_to_a_best or score > b_to_a_best[col_b][1]:
+            b_to_a_best[col_b] = (col_a, float(score))
+    
+    matched_cols1 = {v[0] for v in b_to_a_best.values()}
+    remaining_cols1 = [c for c in cols1 if c not in matched_cols1]
+    
+    if remaining_cols1:
+        # 2. Use the selected matcher for the rest
+        if matcher == "ollama":
+            if threshold is None or not isinstance(threshold, float):
+                threshold = 0.75
+            
+            semantic_matches = suggest_ollama_matches(remaining_cols1, cols2, threshold)
+            # FIX 8: Silent Ollama fallback
+            if not semantic_matches and matcher == "ollama":
+                st.warning(
+                    "Ollama returned no matches — "
+                    "falling back to fuzzy matching automatically."
+                )
+            for col_a, (col_b, score) in semantic_matches.items():
+                # For semantic matches, we only update if col_b isn't already 
+                # "strongly" matched by fuzzy logic (score 85+)
+                if col_b not in b_to_a_best:
+                    b_to_a_best[col_b] = (col_a, float(score))
+                elif b_to_a_best[col_b][1] < 85: 
+                    if float(score) > b_to_a_best[col_b][1]:
+                        b_to_a_best[col_b] = (col_a, float(score))
+        else:
+            if threshold is None or not isinstance(threshold, int):
+                threshold = 60
+            
+            remaining_fuzzy = suggest_fuzzy_matches(remaining_cols1, cols2, threshold)
+            for col_a, (col_b, score) in remaining_fuzzy.items():
+                if col_b not in b_to_a_best or score > b_to_a_best[col_b][1]:
+                    b_to_a_best[col_b] = (col_a, float(score))
+            
+    # Convert back to Dict[col_a, col_b]
+    final_matches = {col_a: col_b for col_b, (col_a, _) in b_to_a_best.items()}
+    return final_matches
+
+
+@st.cache_resource(show_spinner=False, ttl=600)
+def check_ollama() -> bool:
+    """
+    Fast check if Ollama is running. 
+    Avoids heavy embedding calls on startup.
+    """
+    try:
+        import requests
+        # Just check if the local server responds on the tags endpoint
+        response = requests.get("http://localhost:11434/api/tags", timeout=1.0)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+@st.cache_data
+def calculate_union_count(df_a: pd.DataFrame, df_b: pd.DataFrame, key_a: str, key_b: str) -> int:
+    """Cached union count calculation for large dataframes."""
+    # Normalize keys for the union count to ensure identity consistency with merge logic (Rule 6)
+    normalized_keys_a = df_a[key_a].astype(str).str.strip().str.upper()
+    normalized_keys_b = df_b[key_b].astype(str).str.strip().str.upper()
+    return pd.concat([normalized_keys_a, normalized_keys_b]).nunique()
+
+
+# ============================================================
+# SECTION 3: SESSION STATE INITIALIZATION
+# ============================================================
+
+def init_session_state():
+    """Initialize all required session state variables."""
+    # UI State
+    if "theme" not in st.session_state:
+        # FIX 1: Wrong default theme
+        st.session_state.theme = "UC Navy (Dark)"
+    if "zoom" not in st.session_state:
+        st.session_state.zoom = 100
+    
+    # Data State
+    if "df_a" not in st.session_state:
+        st.session_state.df_a = None
+    if "df_b" not in st.session_state:
+        st.session_state.df_b = None
+    if "file_a_id" not in st.session_state:
+        st.session_state.file_a_id = None
+    if "file_b_id" not in st.session_state:
+        st.session_state.file_b_id = None
+    
+    # DB Source State
+    if "source_a_type" not in st.session_state:
+        st.session_state.source_a_type = "File Upload"
+    if "source_b_type" not in st.session_state:
+        st.session_state.source_b_type = "File Upload"
+    
+    # UX-05: Pre-select File Upload for segmented controls
+    if "source_a_type_control" not in st.session_state:
+        st.session_state.source_a_type_control = "File Upload"
+    if "source_b_type_control" not in st.session_state:
+        st.session_state.source_b_type_control = "File Upload"
+
+    # UX-03: Track user-initiated clearing of files
+    if "user_cleared_file_a" not in st.session_state:
+        st.session_state.user_cleared_file_a = False
+    if "user_cleared_file_b" not in st.session_state:
+        st.session_state.user_cleared_file_b = False
+    
+    if "suggestions" not in st.session_state:
+        st.session_state.suggestions = {}
+    if "col_pairs" not in st.session_state:
+        st.session_state.col_pairs = []
+    if "composite_map" not in st.session_state:
+        st.session_state.composite_map = []
+    if "key_col_a" not in st.session_state:
+        st.session_state.key_col_a = None
+    if "key_col_b" not in st.session_state:
+        st.session_state.key_col_b = None
+    if "approach" not in st.session_state:
+        st.session_state.approach = None
+    if "results" not in st.session_state:
+        st.session_state.results = None
+    if "ollama_active" not in st.session_state:
+        st.session_state.ollama_active = False
+    if "threshold" not in st.session_state:
+        st.session_state.threshold = 60
+
+
+# ============================================================
+# SECTION 4: SIDEBAR
+# ============================================================
+
+def render_sidebar():
+    """Render sidebar with matching, theme, and zoom settings."""
+    with st.sidebar:
+        # UCSD Branding
+        if os.path.exists("images/uc_color_logo.jpg"):
+            st.image("images/uc_color_logo.jpg", width="stretch")
+        else:
+            st.title("UC San Diego")
+            
+        st.divider()
+        st.subheader("Appearance")
+        
+        # Theme Selector - Fixed persistence and reactivity
+        theme_options = ["UC Navy (Dark)", "UC Gold (Light)", "Standard Dark", "Standard Light"]
+        current_theme = st.session_state.get("theme", "UC Navy (Dark)")
+        
+        selected_theme = st.selectbox(
+            "Application Theme",
+            options=theme_options,
+            index=theme_options.index(current_theme) if current_theme in theme_options else 0,
+            key="theme_selector"
+        )
+        
+        if selected_theme != st.session_state.theme:
+            st.session_state.theme = selected_theme
+            st.rerun()
+        
+        # Zoom Controls
+        st.caption("Display Scale")
+        z_col1, z_col2, z_col3 = st.columns([1, 2, 1])
+        with z_col1:
+            if st.button("−", key="zoom_out"):
+                st.session_state.zoom = max(70, st.session_state.zoom - 10)
+                st.rerun()
+        with z_col2:
+            st.markdown(f"<p style='text-align:center; padding-top:5px; font-weight:bold;'>{st.session_state.zoom}%</p>", unsafe_allow_html=True)
+        with z_col3:
+            if st.button("＋", key="zoom_in"):
+                st.session_state.zoom = min(150, st.session_state.zoom + 10)
+                st.rerun()
+        
+        st.divider()
+        st.subheader("Matching Engine")
+        
+        # Check Ollama availability
+        ollama_available = check_ollama()
+        st.session_state.ollama_available = ollama_available
+        
+        if ollama_available:
+            ollama_toggle = st.toggle(
+                "Enhanced Matching",
+                value=st.session_state.ollama_active,
+                help="Uses local AI embeddings for smarter column suggestions."
+            )
+            st.session_state.ollama_active = ollama_toggle
+            st.caption("Ollama Status: Connected")
+        else:
+            st.session_state.ollama_active = False
+            st.caption("Ollama Status: Not Detected")
+        
+        # Threshold slider
+        matcher = "ollama" if st.session_state.ollama_active else "thefuzz"
+        if matcher == "thefuzz":
+            st.session_state.threshold = st.slider(
+                "Fuzzy Match Threshold",
+                0, 100,
+                value=st.session_state.threshold if isinstance(st.session_state.threshold, int) else 60,
+                step=5
+            )
+        else:
+            st.session_state.threshold = st.slider(
+                "Similarity Threshold",
+                0.0, 1.0,
+                value=st.session_state.threshold if isinstance(st.session_state.threshold, float) else 0.75,
+                step=0.05
+            )
+        
+        st.divider()
+        
+        # Bottom Image
+        if os.path.exists("images/geisel-library-ucsd-54045.jpg"):
+            st.image("images/geisel-library-ucsd-54045.jpg", caption="Geisel Library", width="stretch")
+            
+        st.caption("Data Validation Tool v0.1.0")
+        st.caption("Office of Institutional Research")
+
+
+# ============================================================
+# SECTION 5: MAIN LAYOUT
+# ============================================================
+
+def on_uploader_a_change():
+    """Callback for Source A uploader to track manual clearing."""
+    if st.session_state.uploader_a is None:
+        st.session_state.user_cleared_file_a = True
+
+
+def on_uploader_b_change():
+    """Callback for Source B uploader to track manual clearing."""
+    if st.session_state.uploader_b is None:
+        st.session_state.user_cleared_file_b = True
+
+
+def render_main_header():
+    """Render main title and description."""
+    st.title("Data Validation Dashboard")
+    st.caption(
+        "Cross-source reconciliation for IR data exports and database results"
+    )
+    st.divider()
+
+
+def render_db_config(source_key: str):
+    """Render database configuration fields for a specific source."""
+    st.caption("Database Connection Details")
+    
+    server = st.text_input(
+        "SQL Server",
+        value=DEFAULT_SERVER,
+        key=f"db_server_{source_key}",
+        help="Example: EVC-SQL14.ucsd.edu, 65108"
+    )
+    
+    db_preset_options = ["Other"] + list(IR_DB_PRESETS.keys())
+    selected_db = st.selectbox(
+        "Database",
+        options=db_preset_options,
+        index=db_preset_options.index("IR_DW") if "IR_DW" in db_preset_options else 0,
+        key=f"db_preset_{source_key}"
+    )
+    
+    if selected_db == "Other":
+        database = st.text_input("Manual Database Name", key=f"db_manual_{source_key}")
+    else:
+        database = IR_DB_PRESETS[selected_db]
+        
+    use_win_auth = st.toggle(
+        "Use Windows Authentication",
+        value=True,
+        key=f"db_win_auth_{source_key}"
+    )
+    
+    username = None
+    password = None
+    if not use_win_auth:
+        u_col, p_col = st.columns(2)
+        username = u_col.text_input("Username", key=f"db_user_{source_key}")
+        password = p_col.text_input("Password", type="password", key=f"db_pass_{source_key}")
+        
+    query = st.text_area(
+        "SQL Query",
+        placeholder="SELECT * FROM schema.table",
+        key=f"db_query_{source_key}",
+        height=150,
+        help="Complex queries with subqueries and CTEs are supported."
+    )
+    
+    if st.button("Run Query", key=f"db_run_{source_key}", type="secondary"):
+        if not query.strip():
+            st.error("Please enter a SQL query.")
+            return
+            
+        with st.spinner("Executing query..."):
+            try:
+                df = run_db_query(server, database, query, username, password, use_win_auth)
+                if df is not None:
+                    if source_key == "a":
+                        st.session_state.df_a = df
+                        st.session_state.file_a_id = f"db_a_{hash(query)}"
+                    else:
+                        st.session_state.df_b = df
+                        st.session_state.file_b_id = f"db_b_{hash(query)}"
+                    
+                    st.session_state.col_pairs = []
+                    st.session_state.results = None
+                    st.success(f"Query successful: {len(df):,} records retrieved.")
+            except Exception as e:
+                st.error(f"Query failed: {str(e)}")
+
+
+def render_source_uploaders():
+    """Render side-by-side source selectors (File or DB) with state persistence."""
+    col_a, col_b = st.columns([1, 1])
+    
+    # Source A
+    with col_a:
+        st.subheader("Source A")
+        # FIX 5: Segmented control silent fallback
+        _raw_a = st.segmented_control(
+            "Source A Type",
+            options=["File Upload", "Database Query"],
+            key="source_a_type_control",
+            label_visibility="collapsed"
+        )
+        source_a_type = _raw_a if _raw_a is not None else st.session_state.source_a_type
+        
+        if source_a_type != st.session_state.source_a_type:
+            st.session_state.source_a_type = source_a_type
+            st.session_state.df_a = None
+            st.session_state.file_a_id = None
+            st.session_state.col_pairs = []
+            st.session_state.results = None
+            st.rerun()
+
+        if source_a_type == "File Upload":
+            file_a = st.file_uploader(
+                "Select primary source file",
+                type=["xlsx", "xls", "csv", "tsv", "txt", "json", "parquet", "pdf"],
+                key="uploader_a",
+                on_change=on_uploader_a_change
+            )
+            
+            if file_a:
+                file_key = f"{file_a.name}_{file_a.size}"
+                if st.session_state.file_a_id != file_key:
+                    df_a = load_file(file_a)
+                    if df_a is not None:
+                        st.session_state.df_a = df_a
+                        st.session_state.file_a_id = file_key
+                        st.session_state.col_pairs = []
+                        st.session_state.results = None
+                st.session_state.user_cleared_file_a = False
+
+            if st.session_state.user_cleared_file_a:
+                st.session_state.df_a = None
+                st.session_state.file_a_id = None
+                st.session_state.col_pairs = []
+                st.session_state.results = None
+                st.session_state.user_cleared_file_a = False
+                st.rerun()
+                
+            if st.session_state.df_a is not None and not str(st.session_state.file_a_id).startswith("db_"):
+                st.success(f"Loaded: {st.session_state.df_a.shape[0]:,} records")
+                with st.expander("Preview Source A"):
+                    st.dataframe(st.session_state.df_a.head(5), width="stretch")
+        else:
+            render_db_config("a")
+            if st.session_state.df_a is not None:
+                with st.expander("Preview Source A Results"):
+                    st.dataframe(st.session_state.df_a.head(5), width="stretch")
+    
+    # Source B
+    with col_b:
+        st.subheader("Source B")
+        # FIX 5: Segmented control silent fallback
+        _raw_b = st.segmented_control(
+            "Source B Type",
+            options=["File Upload", "Database Query"],
+            key="source_b_type_control",
+            label_visibility="collapsed"
+        )
+        source_b_type = _raw_b if _raw_b is not None else st.session_state.source_b_type
+
+        if source_b_type != st.session_state.source_b_type:
+            st.session_state.source_b_type = source_b_type
+            st.session_state.df_b = None
+            st.session_state.file_b_id = None
+            st.session_state.col_pairs = []
+            st.session_state.results = None
+            st.rerun()
+            
+        if source_b_type == "File Upload":
+            file_b = st.file_uploader(
+                "Select comparison source file",
+                type=["xlsx", "xls", "csv", "tsv", "txt", "json", "parquet", "pdf"],
+                key="uploader_b",
+                on_change=on_uploader_b_change
+            )
+            
+            if file_b:
+                file_key = f"{file_b.name}_{file_b.size}"
+                if st.session_state.file_b_id != file_key:
+                    df_b = load_file(file_b)
+                    if df_b is not None:
+                        st.session_state.df_b = df_b
+                        st.session_state.file_b_id = file_key
+                        st.session_state.col_pairs = []
+                        st.session_state.results = None
+                st.session_state.user_cleared_file_b = False
+
+            if st.session_state.user_cleared_file_b:
+                st.session_state.df_b = None
+                st.session_state.file_b_id = None
+                st.session_state.col_pairs = []
+                st.session_state.results = None
+                st.session_state.user_cleared_file_b = False
+                st.rerun()
+                
+            if st.session_state.df_b is not None and not str(st.session_state.file_b_id).startswith("db_"):
+                st.success(f"Loaded: {st.session_state.df_b.shape[0]:,} records")
+                with st.expander("Preview Source B"):
+                    st.dataframe(st.session_state.df_b.head(5), width="stretch")
+        else:
+            render_db_config("b")
+            if st.session_state.df_b is not None:
+                with st.expander("Preview Source B Results"):
+                    st.dataframe(st.session_state.df_b.head(5), width="stretch")
+
+
+# ============================================================
+# SECTION 6: COLUMN MAPPING
+# ============================================================
+
+def render_column_mapping():
+    """Render column mapping UI with reactive auto-suggestions."""
+    if st.session_state.df_a is None or st.session_state.df_b is None:
+        return
+    
+    st.divider()
+    st.subheader("Column Mapping")
+    st.caption(
+        "Mapped pairs are used to compare values between sources."
+    )
+
+    cols_a = [""] + list(st.session_state.df_a.columns)
+    cols_b = [""] + list(st.session_state.df_b.columns)
+
+    # UX-04: Key Column Selectors at the TOP
+    st.subheader("Key Columns")
+    st.caption(
+        "Select the column that uniquely identifies each record in both sources"
+    )
+    
+    col_key_a, col_key_b = st.columns([1, 1])
+    
+    with col_key_a:
+        st.selectbox(
+            "Key Column — Source A",
+            cols_a,
+            index=cols_a.index(st.session_state.key_col_a) if st.session_state.key_col_a in cols_a else 0,
+            key="key_col_a"
+        )
+    
+    with col_key_b:
+        st.selectbox(
+            "Key Column — Source B",
+            cols_b,
+            index=cols_b.index(st.session_state.key_col_b) if st.session_state.key_col_b in cols_b else 0,
+            key="key_col_b"
+        )
+    
+    st.divider()
+    
+    # ========== REACTIVE SUGGESTION TRIGGER ==========
+    current_suggestion_state = (
+        st.session_state.ollama_active,
+        st.session_state.file_a_id,
+        st.session_state.file_b_id
+    )
+    
+    if (not st.session_state.col_pairs or 
+        st.session_state.get("last_suggestion_state") != current_suggestion_state):
+        
+        matcher = "ollama" if st.session_state.ollama_active else "thefuzz"
+        threshold = st.session_state.threshold
+        
+        with st.spinner("Calculating suggestions..."):
+            suggestions = suggest_matches(
+                list(st.session_state.df_a.columns),
+                list(st.session_state.df_b.columns),
+                matcher=matcher,
+                threshold=threshold
+            )
+        
+        st.session_state.suggestions = suggestions
+        
+        # Initialize col_pairs from suggestions
+        if suggestions:
+            st.session_state.col_pairs = [
+                {"id": str(uuid.uuid4()), "a": col_a, "b": col_b}
+                for col_a, col_b in suggestions.items()
+            ]
+        else:
+            st.session_state.col_pairs = [{"id": str(uuid.uuid4()), "a": "", "b": ""}]
+        
+        # Store state for change detection
+        st.session_state.last_suggestion_state = current_suggestion_state
+    
+    # FIX 3 — app.py: Add manual suggestion refresh button to render_column_mapping() (UX)
+    if st.button(
+        "🔄 Regenerate Column Suggestions",
+        key="regen_suggestions",
+        help="Re-run column matching with current threshold and engine settings"
+    ):
+        st.session_state.last_suggestion_state = None
+        st.session_state.col_pairs = []
+        st.rerun()
+
+    # ========== COLUMN PAIRS BUILDER (APPROACHES 1 & 2) ==========
+    st.subheader("Column Pairs")
+    
+    # Auto-strip keys from pairs if they are selected as keys
+    ka = st.session_state.key_col_a
+    kb = st.session_state.key_col_b
+    filtered_pairs = [p for p in st.session_state.col_pairs if not (p["a"] == ka or p["b"] == kb)]
+    if len(filtered_pairs) != len(st.session_state.col_pairs):
+        st.session_state.col_pairs = filtered_pairs
+        st.rerun()
+    
+    # Display existing pairs
+    for pair in st.session_state.col_pairs:
+        pid = pair["id"]
+        col1, col2, col3 = st.columns([5, 5, 1])
+        
+        with col1:
+            selected_a = st.selectbox(
+                "Source A Column",
+                cols_a,
+                index=cols_a.index(pair["a"]) if pair["a"] in cols_a else 0,
+                key=f"a_{pid}",
+                label_visibility="collapsed"
+            )
+            pair["a"] = selected_a
+        
+        with col2:
+            selected_b = st.selectbox(
+                "Source B Column",
+                cols_b,
+                index=cols_b.index(pair["b"]) if pair["b"] in cols_b else 0,
+                key=f"b_{pid}",
+                label_visibility="collapsed"
+            )
+            pair["b"] = selected_b
+        
+        with col3:
+            # UX-01: Label "✕" | UX-02: width="stretch"
+            if st.button("✕", key=f"remove_{pid}", use_container_width=True):
+                st.session_state.col_pairs = [p for p in st.session_state.col_pairs if p["id"] != pid]
+                st.rerun()
+    
+    # ADDITION 1: Duplicate target column warning
+    # Check if any Source B column appears more than once across all complete pairs
+    col_b_values = [pair["b"] for pair in st.session_state.col_pairs if pair["b"]]
+    if len(col_b_values) != len(set(col_b_values)):
+        dupes = [col for col in set(col_b_values) if col_b_values.count(col) > 1]
+        st.warning(
+            f"Duplicate Source B column detected: {dupes[0]}. "
+            f"Each Source B column can only be mapped once. "
+            f"Validation will fail until this is resolved."
+        )
+    
+    # Add pair button
+    if st.button("Add Column Pair"):
+        st.session_state.col_pairs.append({"id": str(uuid.uuid4()), "a": "", "b": ""})
+        st.rerun()
+    
+    # ========== COMPOSITE MAPPING BUILDER (APPROACH 3 ONLY) ==========
+    st.subheader("Composite Column Pairs")
+    st.caption(
+        "Each Source A column can match against multiple Source B columns"
+    )
+
+    # Auto-strip keys from composite pairs
+    filtered_comp = [p for p in st.session_state.composite_map if not (p.get("a") == ka or kb in p.get("bs", []))]
+    if len(filtered_comp) != len(st.session_state.composite_map):
+        st.session_state.composite_map = filtered_comp
+        st.rerun()
+    
+    # Display existing composite pairs
+    for comp_pair in st.session_state.composite_map:
+        if "id" not in comp_pair: comp_pair["id"] = str(uuid.uuid4())
+        pid = comp_pair["id"]
+        col1, col2, col3 = st.columns([5, 5, 1])
+        
+        with col1:
+            selected_a = st.selectbox(
+                "Source A (composite)",
+                cols_a,
+                index=cols_a.index(comp_pair.get("a", "")) if comp_pair.get("a", "") in cols_a else 0,
+                key=f"comp_a_{pid}",
+                label_visibility="collapsed"
+            )
+            comp_pair["a"] = selected_a
+        
+        with col2:
+            selected_bs = st.multiselect(
+                "Source B targets (match ANY)",
+                list(st.session_state.df_b.columns),
+                default=comp_pair.get("bs", []),
+                key=f"comp_b_{pid}"
+            )
+            comp_pair["bs"] = selected_bs
+        
+        with col3:
+            # UX-01: Label "✕" | UX-02: width="stretch"
+            if st.button("✕", key=f"remove_comp_{pid}", use_container_width=True):
+                st.session_state.composite_map = [p for p in st.session_state.composite_map if p.get("id") != pid]
+                st.rerun()
+    
+    # Add composite pair button
+    if st.button("Add Composite Pair"):
+        st.session_state.composite_map.append({"id": str(uuid.uuid4()), "a": "", "bs": []})
+        st.rerun()
+
+
+# ============================================================
+# SECTION 7: APPROACH SELECTOR
+# ============================================================
+
+def render_approach_selector():
+    """Render approach selector and descriptions."""
+    # Gate: Only show if both sources loaded AND at least one complete pair
+    if st.session_state.df_a is None or st.session_state.df_b is None:
+        return
+    
+    # Check if at least one complete pair exists
+    has_complete_pair = any(
+        pair["a"] and pair["b"]
+        for pair in st.session_state.col_pairs
+    )
+    
+    if not has_complete_pair:
+        return
+    
+    st.divider()
+    st.subheader("Select Validation Approach")
+    
+    approach = st.radio(
+        "Choose validation method:",
+        options=[
+            "Approach 1 — Descriptive Statistics",
+            "Approach 2 — Record-Level Comparison",
+            "Approach 3 — Composite Comparison"
+        ],
+        horizontal=False,
+        key="approach_radio"
+    )
+    
+    st.session_state.approach = approach
+    
+    # Show approach description
+    descriptions = {
+        "Approach 1 — Descriptive Statistics": 
+            "Compare summary statistics between sources",
+        "Approach 2 — Record-Level Comparison": 
+            "Find exact row-level mismatches by key",
+        "Approach 3 — Composite Comparison": 
+            "Match one source column against multiple target columns"
+    }
+    
+    st.info(f"**{approach}:** {descriptions[approach]}")
+
+
+# ============================================================
+# SECTION 7B: HELPER FUNCTIONS FOR VALIDATION
+# ============================================================
+
+def build_column_map(col_pairs: List[Dict[str, str]]) -> Dict[str, str]:
+    """
+    Convert col_pairs to format expected by validation_utils.
+    """
+    return {
+        pair["a"]: pair["b"]
+        for pair in col_pairs
+        if pair["a"] and pair["b"]
+    }
+
+
+def filter_numeric_column_map(
+    df_a: pd.DataFrame,
+    df_b: pd.DataFrame,
+    column_map: Dict[str, str]
+) -> Dict[str, str]:
+    """Keep only numeric column pairs after coercion."""
+    numeric_map: Dict[str, str] = {}
+    for col_a, col_b in column_map.items():
+        s1, s2, _ = coerce_columns(df_a[col_a], df_b[col_b])
+        if pd.api.types.is_numeric_dtype(s1.dtype) and pd.api.types.is_numeric_dtype(s2.dtype):
+            numeric_map[col_a] = col_b
+    return numeric_map
+
+
+def build_composite_map(composite_map: List[Dict[str, Union[str, List[str]]]]) -> Dict[str, List[str]]:
+    """
+    Convert composite_map to format expected by validation_utils.
+    """
+    return {
+        pair["a"]: pair["bs"]
+        for pair in composite_map
+        if pair["a"] and pair["bs"] and len(pair["bs"]) > 0
+    }
+
+
+def calculate_match_score(results_df: pd.DataFrame, total_unique_keys: int) -> float:
+    """
+    Calculate match score as a percentage of total unique keys across both sources.
+    Handles Approach 2 (NaNs) and Approach 3 ('<MISSING>') placeholders.
+    """
+    if results_df.empty:
+        return 100.0
+    
+    if total_unique_keys <= 0:
+        return 0.0
+
+    # Identify unique keys that have any kind of mismatch
+    # (Value mismatch, missing in A, or missing in B)
+    m_df = results_df.copy()
+    m_df.replace('<MISSING>', np.nan, inplace=True)
+    
+    mismatched_keys = m_df['key_df1'].fillna(m_df['key_df2'])
+    mismatched_count = mismatched_keys.nunique()
+    
+    score = (1 - mismatched_count / total_unique_keys) * 100
+    return round(max(0.0, score), 1)
+
+
+def calculate_per_column_scores(
+    results_df: pd.DataFrame,
+    joined_count: int
+) -> List[tuple[str, float]]:
+    """
+    Calculate per-column match rates based on records present in BOTH sources.
+    """
+    if results_df.empty:
+        return []
+
+    if joined_count <= 0:
+        return []
+
+    # Only look at column-level mismatches (ignore row-level missing)
+    m_df = results_df[results_df['col_df1'] != '<ROW MISSING>'].copy()
+    if m_df.empty:
+        return []
+        
+    m_df.replace('<MISSING>', np.nan, inplace=True)
+    m_df['unified_key'] = m_df['key_df1'].fillna(m_df['key_df2'])
+
+    grouped = (
+        m_df
+        .groupby('col_df1')['unified_key']
+        .nunique()
+        .reset_index(name='mismatches')
+    )
+    
+    # Denominator is records present in both
+    grouped['score'] = ((1 - grouped['mismatches'] / joined_count) * 100).round(1)
+    grouped = grouped.sort_values('score', ascending=True)
+    return list(zip(grouped['col_df1'], grouped['score']))
+
+
+def get_score_color(score: float) -> str:
+    if score >= 95:
+        return '#00C851'
+    if score >= 80:
+        return '#FF8800'
+    if score >= 50:
+        return '#FF4444'
+    return '#CC0000'
+
+
+def render_per_column_score_cards(per_column_scores: List[tuple[str, float]]):
+    if not per_column_scores:
+        return
+
+    container = st.expander('Per-Column Scores', expanded=False) if len(per_column_scores) > 6 else st.container()
+    with container:
+        for i in range(0, len(per_column_scores), 6):
+            row_scores = per_column_scores[i:i + 6]
+            cols = st.columns(len(row_scores))
+            for col, (col_name, col_score) in zip(cols, row_scores):
+                color = get_score_color(col_score)
+                col.markdown(
+                    f"<div class='dashboard-card'>"
+                    f"<div class='dashboard-card-label'>{col_name}</div>"
+                    f"<div style='font-size:2.2rem; font-weight:700; color:{color};'>{col_score}%</div>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+        st.caption('Columns sorted by match rate — lowest first')
+
+
+def run_preflight_checks(df_a, df_b, key_col_a, key_col_b, complete_pairs, composite_pairs, approach):
+    """Run pre-flight validation checks before execution."""
+    errors = []
+    warnings = []
+    
+    # Check 1 — Key column uniqueness
+    for df, col in [(df_a, key_col_a), (df_b, key_col_b)]:
+        ratio = df[col].nunique() / len(df)
+        if ratio < 0.10:
+            errors.append(
+                f"Key column '{col}' is only {ratio*100:.1f}% unique — "
+                f"risk of incorrect matching. Use Identification Number or Student PID."
+            )
+        
+        # Entropy Check (Sequence detection)
+        if pd.api.types.is_numeric_dtype(df[col]):
+            diffs = df[col].sort_values().diff().dropna()
+            if (diffs == 1).mean() > 0.95:
+                warnings.append(
+                    f"Key column '{col}' appears to be a simple sequence (1, 2, 3...). "
+                    f"If one source has a header offset, the entire comparison will fail."
+                )
+
+    # Check 2 — Key column in column pairs
+    if approach == "Approach 2 — Record-Level Comparison":
+        if any(p["a"] == key_col_a for p in complete_pairs):
+            errors.append(f"Key column '{key_col_a}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
+        if any(p["b"] == key_col_b for p in complete_pairs):
+            errors.append(f"Key column '{key_col_b}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
+    elif approach == "Approach 3 — Composite Comparison":
+        if any(p["a"] == key_col_a for p in composite_pairs):
+            errors.append(f"Key column '{key_col_a}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
+        if any(key_col_b in p["bs"] for p in composite_pairs):
+            errors.append(f"Key column '{key_col_b}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
+
+    # Check 3 — Duplicate target columns
+    if approach == "Approach 2 — Record-Level Comparison":
+        col_b_vals = [p["b"] for p in complete_pairs]
+        dupes = set([c for c in col_b_vals if col_b_vals.count(c) > 1])
+        for d in dupes:
+            errors.append(f"Source B column '{d}' is mapped more than once. Each target column can only be mapped once.")
+    elif approach == "Approach 3 — Composite Comparison":
+        col_b_vals = [cb for p in composite_pairs for cb in p["bs"]]
+        dupes = set([c for c in col_b_vals if col_b_vals.count(c) > 1])
+        for d in dupes:
+            errors.append(f"Source B column '{d}' is mapped more than once. Each target column can only be mapped once.")
+
+    # Check 4 — Row count mismatch
+    if len(df_a) != len(df_b):
+        warnings.append(f"Source A has {len(df_a):,} rows and Source B has {len(df_b):,} rows. Verify your filters match before running.")
+
+    # Check 5 — Column pair count warning
+    n = len(complete_pairs) if approach == "Approach 2 — Record-Level Comparison" else len(composite_pairs)
+    if n > 20:
+        warnings.append(f"{n} column pairs selected. Consider reducing to key analytical fields first — large comparisons on big datasets may be slow.")
+
+    # Check 6 — Estimated merge size warning (Refined for unique keys)
+    ratio_a = df_a[key_col_a].nunique() / len(df_a)
+    ratio_b = df_b[key_col_b].nunique() / len(df_b)
+    
+    if ratio_a < 0.9 or ratio_b < 0.9:
+        estimated_rows = len(df_a) * len(df_b)
+        if estimated_rows > 10_000_000:
+            errors.append(
+                f"Potential Join Conflict: Key columns are not unique enough ({ratio_a*100:.1f}% / {ratio_b*100:.1f}% unique). "
+                f"Estimated operation size is {estimated_rows:,} records — this may impact performance."
+            )
+
+    # Render output
+    for err in errors:
+        st.error(err)
+    for warn in warnings:
+        st.warning(warn)
+    
+    if not errors and not warnings:
+        st.success("Pre-flight checks passed — ready to run.")
+    
+    is_safe = len(errors) == 0
+    return is_safe, errors, warnings
+
+
+# ============================================================
+# SECTION 8: VALIDATION APPROACHES (PHASE 3.3)
+# ============================================================
+
+def render_validation_approaches():
+    """Render validation approach execution with buttons and results."""
+    
+    # ===== VALIDATION GATE =====
+    df_a = st.session_state.df_a
+    df_b = st.session_state.df_b
+    key_col_a = st.session_state.key_col_a
+    key_col_b = st.session_state.key_col_b
+    approach = st.session_state.approach
+    
+    # Check basic requirements
+    if df_a is None or df_b is None:
+        return
+    
+    if key_col_a is None or key_col_a == "":
+        st.info("Please select source A key column to continue")
+        return
+    
+    if key_col_b is None or key_col_b == "":
+        st.info("Please select source B key column to continue")
+        return
+    
+    if approach is None:
+        st.info("Please select a validation approach to continue")
+        return
+    
+    # ADDITION 3: Row count mismatch banner
+    # Warn if Source A and Source B have different row counts
+    if len(df_a) != len(df_b):
+        st.warning(
+            f"Source A has {len(df_a):,} rows and Source B has {len(df_b):,} rows. "
+            f"If these should be the same dataset, check your filters before running."
+        )
+    
+    # Normalize keys for the union count to ensure identity consistency with merge logic (Rule 6)
+    total_keys = calculate_union_count(df_a, df_b, key_col_a, key_col_b)
+
+    # Check for approach-specific requirements
+    complete_pairs = [
+        pair for pair in st.session_state.col_pairs
+        if pair["a"] and pair["b"]
+    ]
+    
+    composite_pairs = [
+        pair for pair in st.session_state.composite_map
+        if pair["a"] and pair["bs"] and len(pair["bs"]) > 0
+    ]
+    
+    if approach in ["Approach 1 — Descriptive Statistics",
+                    "Approach 2 — Record-Level Comparison"]:
+        if not complete_pairs:
+            st.info("Please add at least one **complete column pair** to continue")
+            return
+    elif approach == "Approach 3 — Composite Comparison":
+        if not composite_pairs:
+            st.info("Please add at least one **composite pair** to continue")
+            return
+    
+    st.divider()
+
+    # --- PREFLIGHT CHECKS ---
+    is_safe = True
+    if approach in ["Approach 2 — Record-Level Comparison", "Approach 3 — Composite Comparison"]:
+        is_safe, _, _ = run_preflight_checks(
+            df_a, df_b, key_col_a, key_col_b, 
+            complete_pairs, composite_pairs, approach
+        )
+    
+    # ===== APPROACH 1: DESCRIPTIVE STATISTICS =====
+    if approach == "Approach 1 — Descriptive Statistics":
+        st.subheader("Approach 1 — Descriptive Statistics")
+        st.caption("Compare summary statistics between sources to quickly identify distributional differences")
+        
+        # Show active mapping
+        with st.expander("Active Column Mapping"):
+            for pair in complete_pairs:
+                st.text(f"  {pair['a']} → {pair['b']}")
+        
+        st.info(
+            f"Ready to compare {len(df_a):,} Source A records against {len(df_b):,} "
+            f"Source B records across {len(complete_pairs)} column pairs."
+        )
+
+        # Run button
+        if st.button("Run Descriptive Comparison", key="run_approach1", type="primary", disabled=not is_safe):
+            col_map = build_column_map(complete_pairs)
+            
+            if not col_map:
+                st.warning("No complete column pairs found")
+                return
+
+            converted_a = try_convert_numeric(df_a, list(col_map.keys()))
+            converted_b = try_convert_numeric(df_b, list(col_map.values()))
+
+            # FIX 7: Surface skipped non-numeric columns in Approach 1
+            numeric_map = filter_numeric_column_map(converted_a, converted_b, col_map)
+            skipped = [col for col in col_map if col not in numeric_map]
+            if skipped:
+                st.caption(f"Skipped (non-numeric after conversion): {skipped}")
+
+            if not numeric_map:
+                st.warning(
+                    "No numeric columns found after conversion attempt — try Approach 2 for string or ID comparisons."
+                )
+                return
+
+            numeric_conversion_applied = False
+            for col in col_map:
+                if (col in converted_a.columns and
+                    not pd.api.types.is_numeric_dtype(df_a[col]) and
+                    pd.api.types.is_numeric_dtype(converted_a[col])):
+                    numeric_conversion_applied = True
+                    break
+            if not numeric_conversion_applied:
+                for col in col_map.values():
+                    if (col in converted_b.columns and
+                        not pd.api.types.is_numeric_dtype(df_b[col]) and
+                        pd.api.types.is_numeric_dtype(converted_b[col])):
+                        numeric_conversion_applied = True
+                        break
+
+            with st.status("Running comparison...", expanded=True) as status:
+                st.write("Preparing data...")
+                try:
+                    abs_diff, rel_diff, coercion_log = validate_data(
+                        converted_a,
+                        converted_b,
+                        numeric_map
+                    )
+                    
+                    st.session_state.results = {
+                        "type": "approach1",
+                        "abs_diff": abs_diff,
+                        "rel_diff": rel_diff,
+                        "coercion_log": coercion_log
+                    }
+                    if numeric_conversion_applied:
+                        st.caption(
+                            "Some columns were automatically converted to numeric for comparison."
+                        )
+                except Exception as e:
+                    st.error(f"Comparison failed: {str(e)}")
+                    return
+                st.write("Comparison complete.")
+                status.update(label="Complete!", state="complete", expanded=False)
+        
+        # Display results
+        if (st.session_state.results and 
+            st.session_state.results.get("type") == "approach1"):
+            
+            results = st.session_state.results
+            st.divider()
+            st.subheader("Results")
+            
+            col_left, col_right = st.columns([1, 1])
+            with col_left:
+                st.caption("Absolute Difference")
+                st.dataframe(results["abs_diff"], width="stretch")
+            with col_right:
+                st.caption("Relative Difference (%)")
+                st.dataframe(results["rel_diff"], width="stretch")
+            
+            st.metric("Columns Compared", len(build_column_map(complete_pairs)))
+
+            if results.get("coercion_log"):
+                with st.expander("Type Handling Notes", expanded=False):
+                    st.caption("Notes reflect temporary standardization applied during comparison. Source data remains unchanged.")
+                    for note in results["coercion_log"]:
+                        st.caption(f"• {note}")
+    
+    # ===== APPROACH 2: RECORD-LEVEL COMPARISON =====
+    elif approach == "Approach 2 — Record-Level Comparison":
+        st.subheader("Approach 2 — Record-Level Comparison")
+        st.caption("Find exact row-level mismatches between sources matched on key column")
+        
+        # Show active mapping
+        with st.expander("Active Column Mapping"):
+            for pair in complete_pairs:
+                st.text(f"  {pair['a']} → {pair['b']}")
+        
+        # Show key pair
+        st.info(f"Matching on: {key_col_a}  {key_col_b}")
+        st.info(
+            f"Ready to compare {len(df_a):,} Source A records against {len(df_b):,} "
+            f"Source B records across {len(complete_pairs)} column pairs."
+        )
+        
+        # Run button
+        if st.button("Run Record-Level Comparison", key="run_approach2", type="primary", disabled=not is_safe):
+            col_map = build_column_map(complete_pairs)
+            
+            if not col_map:
+                st.warning("No complete column pairs found")
+                return
+            
+            # ADDITION 4: Auto-strip key column from column pairs
+            col_map = {
+                col_a: col_b
+                for col_a, col_b in col_map.items()
+                if col_a != key_col_a and col_b != key_col_b
+            }
+            
+            with st.status("Running comparison...", expanded=True) as status:
+                st.write(" Preparing data...")
+                try:
+                    results_df, coercion_log = compare_records(
+                        df1=df_a,
+                        df2=df_b,
+                        key_map=(key_col_a, key_col_b),
+                        column_map=col_map,
+                        output_path=None,
+                        ask_before_write=False
+                    )
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    
+                    st.session_state.results = {
+                        "type": "approach2",
+                        "data": results_df,
+                        "coercion_log": coercion_log,
+                        "col_map": col_map,
+                        "ts": ts
+                    }
+                except Exception as e:
+                    st.error(f" Comparison failed: {str(e)}")
+                    return
+                st.write(" Comparison complete.")
+                status.update(label="Complete!", state="complete", expanded=False)
+        
+        # Display results
+        if (st.session_state.results and 
+            st.session_state.results.get("type") == "approach2"):
+            
+            results = st.session_state.results
+            st.divider()
+            st.subheader("Results")
+            
+            # Calculate common statistics
+            m_df_raw = results["data"].copy()
+            m_df_raw.replace('<MISSING>', np.nan, inplace=True)
+            
+            # Unified keys for all mismatches
+            m_keys_series = m_df_raw['key_df1'].fillna(m_df_raw['key_df2']).replace('<MISSING>', np.nan)
+            mismatch_count = int(m_keys_series.nunique())
+            
+            # Count records present in both (Intersection)
+            # Normalize locally to ensure joined_count is accurate to the matching Rule 6
+            norm_a = df_a[key_col_a].astype(str).str.strip().str.upper()
+            norm_b = df_b[key_col_b].astype(str).str.strip().str.upper()
+            joined_count = len(set(norm_a) & set(norm_b))
+            
+            score = calculate_match_score(results["data"], total_keys)
+            
+            # RESULTS-01 & 04: Summary Coverage Metrics
+            missing_in_a = results["data"][results["data"]['match_type'] == 'Missing in Source A']['key_df2'].nunique()
+            missing_in_b = results["data"][results["data"]['match_type'] == 'Missing in Source B']['key_df1'].nunique()
+            mismatched_joined = results["data"][results["data"]['col_df1'] != '<ROW MISSING>']['key_df1'].nunique()
+            fully_matched_joined = joined_count - mismatched_joined
+
+            # RESULTS-05: Narrative Copy
+            if score == 100:
+                narrative = "All clear! Every record and value matched perfectly between sources."
+            elif score >= 95:
+                narrative = "Mostly matched with limited issues. Data integrity is high with few discrepancies."
+            elif score >= 80:
+                narrative = "Review recommended. Significant portions match, but some systematic issues may be present."
+            else:
+                narrative = "Significant mismatch volume detected. Verify column mappings and source data consistency."
+            
+            badge_color = get_score_color(score)
+            badge_label = (
+                "Excellent Match" if score >= 95 else
+                "Review Recommended" if score >= 80 else
+                "Significant Mismatches" if score >= 50 else
+                "Likely Column Mismatch — Check Mapping"
+            )
+
+            st.markdown(
+                f"<div class='dashboard-card' style='margin-bottom:1rem; border:none; background:transparent;'>"
+                f"<div style='font-size:4rem; font-weight:700; color:{badge_color};'>"
+                f"{score}%</div>"
+                f"<div style='font-size:1.1rem; color:{badge_color}; font-weight:600;'>{badge_label}</div>"
+                f"<div style='font-size:1rem; color:{badge_color}; font-style:italic; margin-top:0.5rem;'>{narrative}</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+
+            # RESULTS-02: Status Message
+            st.info("Detailed results show mismatches only. Records not shown here matched successfully for the selected mappings.")
+            st.caption("Note: Displayed values are raw source-facing values. Comparison may apply temporary in-memory standardization. Review Type Handling Notes for details.")
+
+            per_column_scores = calculate_per_column_scores(results["data"], joined_count)
+            render_per_column_score_cards(per_column_scores)
+
+            # RESULTS-03: Clean Columns Summary
+            col_map_used = results.get("col_map", {})
+            all_mapped_cols = set(col_map_used.keys())
+            mismatched_cols = set(results["data"][results["data"]['col_df1'] != '<ROW MISSING>']['col_df1'].unique())
+            clean_cols = sorted(list(all_mapped_cols - mismatched_cols))
+            
+            if clean_cols:
+                st.caption(f"✅ Validated Cleanly ({len(clean_cols)} columns): {', '.join(clean_cols)}")
+
+            st.subheader("Coverage Summary")
+            cols = st.columns(4)
+            cols[0].metric("Joined Records", f"{joined_count:,}")
+            cols[1].metric("Fully Matched", f"{fully_matched_joined:,}")
+            cols[2].metric("Value Mismatches", f"{mismatched_joined:,}")
+            cols[3].metric("Overall Match Rate", f"{score}%")
+
+            cols_missing = st.columns(2)
+            cols_missing[0].metric("Missing in Source A", f"{missing_in_a:,}")
+            cols_missing[1].metric("Missing in Source B", f"{missing_in_b:,}")
+
+            if results["data"].empty:
+                st.success("No differences found!")
+            else:
+                st.divider()
+                st.subheader("Detailed Analysis")
+                
+                # Column Frequency Summary
+                col_freq = results["data"][results["data"]['col_df1'] != '<ROW MISSING>']['col_df1'].value_counts()
+                if not col_freq.empty:
+                    st.caption("Mismatch frequency by column (Total count of rows with differences)")
+                    st.dataframe(col_freq.rename_axis("Column").reset_index(name="Mismatch Count"), width="stretch")
+                
+                # Preview Head(10)
+                st.caption(f"Previewing first 10 of {len(results['data'])} mismatch records")
+                st.dataframe(results["data"].head(10), width="stretch")
+                
+                csv = results["data"].to_csv(index=False)
+                st.download_button(
+                    label="Download Full Results CSV",
+                    data=csv,
+                    file_name=f"validation_results_{results['ts']}.csv",
+                    mime="text/csv",
+                    key=f"download_approach2_full_{results['ts']}",
+                    type="primary"
+                )
+
+            if results.get("coercion_log"):
+                with st.expander("Type Handling Notes", expanded=False):
+                    st.caption("Notes reflect temporary standardization applied during comparison. Source data remains unchanged.")
+                    for note in results["coercion_log"]:
+                        st.caption(f"• {note}")
+                
+                per_column_lines = [f"{col}: {s}%" for col, s in per_column_scores]
+                audit_body = "\n".join([
+                    f"Validation run: {results['ts']}",
+                    f"Total records (union): {total_keys}",
+                    f"Match score: {score}%",
+                    "--- Per-Column Match Scores ---",
+                    *per_column_lines,
+                    "--- Type Handling & Comparison Standardization ---",
+                    "Note: These adjustments are made in memory for comparison only and do not modify source data.",
+                    "Note: If many rows show 'None' or blank values, review Type Handling Notes.",
+                    "Displayed values are source-facing and may differ from comparison-time standardization.",
+                    *results["coercion_log"]
+                ])
+                st.download_button(
+                    label="Download Audit Log",
+                    data=audit_body,
+                    file_name=f"validation_audit_log_{results['ts']}.txt",
+                    mime="text/plain",
+                    key=f"download_audit_approach2_{results['ts']}"
+                )
+    # ===== APPROACH 3: COMPOSITE COMPARISON =====
+    elif approach == "Approach 3 — Composite Comparison":
+        st.subheader("Approach 3 — Composite Comparison")
+        st.caption("Match one source column against multiple target columns — a match on ANY target passes")
+        
+        # Show composite mapping
+        with st.expander("Active Composite Mapping"):
+            for pair in composite_pairs:
+                targets = ", ".join(pair["bs"])
+                st.text(f"  {pair['a']} → [{targets}]")
+        
+        # Show key pair
+        st.info(f"Matching on: {key_col_a}  {key_col_b}")
+        st.info(
+            f"Ready to compare {len(df_a):,} Source A records against {len(df_b):,} "
+            f"Source B records across {len(composite_pairs)} composite mappings."
+        )
+        
+        # Run button
+        if st.button(" Run Composite Comparison", key="run_approach3", type="primary", disabled=not is_safe):
+            comp_map = build_composite_map(composite_pairs)
+            
+            if not comp_map:
+                st.warning(" No complete composite pairs found")
+                return
+            
+            # ADDITION 4: Auto-strip key columns from composite pairs
+            comp_map = {
+                col_a: [col_b for col_b in col_bs if col_b != key_col_b]
+                for col_a, col_bs in comp_map.items()
+                if col_a != key_col_a
+            }
+            # Remove empty entries
+            comp_map = {k: v for k, v in comp_map.items() if v}
+            
+            with st.status("Running comparison...", expanded=True) as status:
+                st.write(" Preparing data...")
+                try:
+                    results_df, coercion_log = compare_composite_records(
+                        df1=df_a,
+                        df2=df_b,
+                        key_map=(key_col_a, key_col_b),
+                        column_map=comp_map,
+                        output_path=None,
+                        ask_before_write=False
+                    )
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    
+                    st.session_state.results = {
+                        "type": "approach3",
+                        "data": results_df,
+                        "coercion_log": coercion_log,
+                        "comp_map": comp_map,
+                        "ts": ts
+                    }
+                except Exception as e:
+                    st.error(f" Comparison failed: {str(e)}")
+                    return
+                st.write(" Comparison complete.")
+                status.update(label="Complete!", state="complete", expanded=False)
+        
+        # Display results
+        if (st.session_state.results and 
+            st.session_state.results.get("type") == "approach3"):
+            
+            results = st.session_state.results
+            st.divider()
+            st.subheader("Results")
+            
+            score = calculate_match_score(results["data"], total_keys)
+            
+            # Intersection for Approach 3
+            norm_a = df_a[key_col_a].astype(str).str.strip().str.upper()
+            norm_b = df_b[key_col_b].astype(str).str.strip().str.upper()
+            joined_count = len(set(norm_a) & set(norm_b))
+
+            # RESULTS-01 & 04: Summary Coverage Metrics
+            missing_in_a = results["data"][(results["data"]['comparison_type'] == 'missing_key') & (results["data"]['key_df1'] == '<MISSING>')]['key_df2'].nunique()
+            missing_in_b = results["data"][(results["data"]['comparison_type'] == 'missing_key') & (results["data"]['key_df2'] == '<MISSING>')]['key_df1'].nunique()
+            mismatched_joined = results["data"][results["data"]['col_df1'] != '<ROW MISSING>']['key_df1'].nunique()
+            fully_matched_joined = joined_count - mismatched_joined
+
+            # RESULTS-05: Narrative Copy
+            if score == 100:
+                narrative = "All clear! Every record and value matched perfectly between sources."
+            elif score >= 95:
+                narrative = "Mostly matched with limited issues. Data integrity is high with few discrepancies."
+            elif score >= 80:
+                narrative = "Review recommended. Significant portions match, but some systematic issues may be present."
+            else:
+                narrative = "Significant mismatch volume detected. Verify column mappings and source data consistency."
+
+            badge_color = get_score_color(score)
+            badge_label = (
+                "Excellent Match" if score >= 95 else
+                "Review Recommended" if score >= 80 else
+                "Significant Mismatches" if score >= 50 else
+                "Likely Column Mismatch — Check Mapping"
+            )
+
+            st.markdown(
+                f"<div class='dashboard-card' style='margin-bottom:1rem; border:none; background:transparent;'>"
+                f"<div style='font-size:4rem; font-weight:700; color:{badge_color};'>"
+                f"{score}%</div>"
+                f"<div style='font-size:1.1rem; color:{badge_color}; font-weight:600;'>{badge_label}</div>"
+                f"<div style='font-size:1rem; color:{badge_color}; font-style:italic; margin-top:0.5rem;'>{narrative}</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+
+            # RESULTS-02: Status Message
+            st.info("Detailed results show mismatches only. Records not shown here matched successfully for the selected mappings.")
+            st.caption("Note: Displayed values are raw source-facing values. Comparison may apply temporary in-memory standardization. Review Type Handling Notes for details.")
+
+            per_column_scores = calculate_per_column_scores(results["data"], joined_count)
+            render_per_column_score_cards(per_column_scores)
+
+            # RESULTS-03: Clean Columns Summary
+            comp_map_used = results.get("comp_map", {})
+            all_mapped_cols = set(comp_map_used.keys())
+            mismatched_cols = set(results["data"][results["data"]['col_df1'] != '<ROW MISSING>']['col_df1'].unique())
+            clean_cols = sorted(list(all_mapped_cols - mismatched_cols))
+            
+            if clean_cols:
+                st.caption(f"✅ Validated Cleanly ({len(clean_cols)} columns): {', '.join(clean_cols)}")
+
+            st.subheader("Coverage Summary")
+            cols = st.columns(4)
+            cols[0].metric("Joined Records", f"{joined_count:,}")
+            cols[1].metric("Fully Matched", f"{fully_matched_joined:,}")
+            cols[2].metric("Value Mismatches", f"{mismatched_joined:,}")
+            cols[3].metric("Overall Match Rate", f"{score}%")
+
+            cols_missing = st.columns(2)
+            cols_missing[0].metric("Missing in Source A", f"{missing_in_a:,}")
+            cols_missing[1].metric("Missing in Source B", f"{missing_in_b:,}")
+
+            if results["data"].empty:
+                st.success("No differences found!")
+            else:
+                st.dataframe(results["data"], width="stretch")
+                
+                csv = results["data"].to_csv(index=False)
+                st.download_button(
+                    label="Download Results CSV",
+                    data=csv,
+                    file_name=f"validation_results_{results['ts']}.csv",
+                    mime="text/csv",
+                    key="download_approach3"
+                )
+
+            if results.get("coercion_log"):
+                with st.expander("Type Handling Notes", expanded=False):
+                    st.caption("Notes reflect temporary standardization applied during comparison. Source data remains unchanged.")
+                    for note in results["coercion_log"]:
+                        st.caption(f"• {note}")
+                
+                per_column_lines = [f"{col}: {s}%" for col, s in per_column_scores]
+                audit_body = "\n".join([
+                    f"Validation run: {results['ts']}",
+                    f"Total records (union): {total_keys}",
+                    f"Match score: {score}%",
+                    "--- Per-Column Match Scores ---",
+                    *per_column_lines,
+                    "--- Type Handling & Comparison Standardization ---",
+                    "Note: These adjustments are made in memory for comparison only and do not modify source data.",
+                    "Note: If many rows show 'None' or blank values, review Type Handling Notes.",
+                    "Displayed values are source-facing and may differ from comparison-time standardization.",
+                    *results["coercion_log"]
+                ])
+                st.download_button(
+                    label="Download Audit Log",
+                    data=audit_body,
+                    file_name=f"validation_audit_log_{results['ts']}.txt",
+                    mime="text/plain",
+                    key=f"download_audit_approach3_{results['ts']}"
+                )
+
+
+# ============================================================
+# MAIN EXECUTION
+# ============================================================
+
+def main():
+    """Main application entry point."""
+    st.set_page_config(
+        page_title="IR Data Validation",
+        page_icon="images/UCSD_Seal.png" if os.path.exists("images/UCSD_Seal.png") else "Results",
+        layout="wide"
+    )
+    
+    # Initialize session state
+    init_session_state()
+    
+    # Render sidebar
+    render_sidebar()
+    
+    # Render main content
+    render_main_header()
+    render_source_uploaders()
+    render_column_mapping()
+    render_approach_selector()
+    render_validation_approaches()
+
+    # Apply theme and zoom after all UI elements are rendered
+    apply_custom_theme()
+
+
+if __name__ == "__main__":
+    main()
