@@ -1,0 +1,9 @@
+{
+  "DEFAULT_SERVER": "YOUR_SQL_SERVER,PORT",
+  "IR_DB_PRESETS": {
+    "IR": "IR",
+    "IR_DW": "IR_DW",
+    "IR_DW_dev": "IR_DW_dev",
+    "IR_STAGING": "IR_STAGING"
+  }
+}

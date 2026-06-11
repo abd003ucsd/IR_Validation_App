@@ -16,6 +16,7 @@ Thumbs.db
 # Local Configuration / Secrets
 .env
 .env.*
+config.json
 
 # Generated Data / Outputs
 *.csv
