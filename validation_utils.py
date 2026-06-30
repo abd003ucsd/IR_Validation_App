@@ -209,7 +209,7 @@ def try_convert_numeric(df: pd.DataFrame, columns):
 def compare_records(
     df1: pd.DataFrame,
     df2: pd.DataFrame,
-    key_map: Tuple[str, str],
+    key_map: Union[Tuple[str, str], Tuple[List[str], List[str]]],
     column_map: Dict[str, str],
     output_path: Optional[str] = None,
     ask_before_write: bool = False
@@ -217,8 +217,18 @@ def compare_records(
     """
     Row-level comparison of column pairs between two DataFrames (Approach 2).
 
-    Aligns records by a key column and identifies exact mismatches.
-    Supports multiple column pair comparisons in a single call.
+    Aligns records by a single key column **or a composite key** (multiple
+    columns) and identifies exact mismatches.  Supports multiple column pair
+    comparisons in a single call.
+
+    Composite-key behaviour
+    -----------------------
+    When ``key_map`` is a 2-tuple of *lists*, each list names the key columns
+    for its respective DataFrame.  The columns are normalised (string → strip →
+    uppercase), then concatenated with ``|`` to form a temporary
+    ``__comp_key`` column that drives the merge.  The composite key string is
+    what appears in ``key_df1`` / ``key_df2`` in the output.  The temporary
+    column is removed from both DataFrames before the function returns.
 
     Parameters
     ----------
@@ -226,9 +236,10 @@ def compare_records(
         First DataFrame (typically Excel export).
     df2 : pd.DataFrame
         Second DataFrame (typically SQL database result).
-    key_map : Tuple[str, str]
-        (df1_key, df2_key) column names identifying matching records.
-        Example: ("PID", "Student PID")
+    key_map : Tuple[str, str] | Tuple[List[str], List[str]]
+        *Single key* – ``("PID", "Student PID")`` – one column per side.
+        *Composite key* – ``(["PID", "TERM"], ["StudentPID", "TermCode"])``
+        – one or more columns per side, concatenated into a pipe-delimited key.
     column_map : Dict[str, str]
         Mapping of df1 columns to df2 columns to compare (1-to-1 pairs).
         Example: {"UTS_CMP_3WKT": "Passed Units Current Cumulative"}
@@ -243,56 +254,105 @@ def compare_records(
     results_df : pd.DataFrame
         DataFrame of mismatches with columns:
         [key_df1, key_df2, col_df1, col_df2, val_df1, val_df2, match_type]
+
+        ``key_df1`` / ``key_df2`` contain the raw key value for single-key
+        usage or the composite key string (e.g. ``"12345|FA22"``) for
+        multi-column key usage.
     coercion_log : List[str]
         Coercion notes collected during preprocessing.
 
     Raises
     ------
     KeyError
-        If any column in key_map or column_map does not exist in df1 or df2.
+        If any column in key_map or column_map does not exist in the
+        corresponding DataFrame.
 
     Examples
     --------
+    Single-key (existing usage – unchanged):
+
     >>> key = ("PID", "Student PID")
     >>> cols = {"UTS_ATP_3WKC": "Attempted Units Term", "UTS_CMP": "Completed Units"}
-    >>> diffs = compare_records(df_excel, df_db, key, cols, output_path="diffs.csv")
-    >>> print(diffs)  # Shows mismatched records
-    """
-    key1, key2 = key_map
+    >>> diffs, log = compare_records(df_excel, df_db, key, cols)
 
-    # Verify column existence
-    missing_1 = [c for c in (key1, *column_map.keys()) if c not in df1.columns]
-    missing_2 = [c for c in (key2, *column_map.values()) if c not in df2.columns]
+    Composite-key (new usage):
+
+    >>> key = (["PID", "TERM"], ["StudentPID", "TermCode"])
+    >>> cols = {"UTS_ATP_3WKC": "Attempted Units Term"}
+    >>> diffs, log = compare_records(df_excel, df_db, key, cols)
+    >>> # key_df1 / key_df2 will contain strings like "A12345|FA22"
+    """
+    # ------------------------------------------------------------------
+    # CHANGE 1: Normalise key_map into two *lists* regardless of whether
+    # the caller passed a Tuple[str, str] (legacy) or Tuple[List, List]
+    # (new composite form).  This keeps the existing call site in app.py
+    # working without any modification.
+    # ------------------------------------------------------------------
+    raw_keys1, raw_keys2 = key_map
+    keys1: List[str] = [raw_keys1] if isinstance(raw_keys1, str) else list(raw_keys1)
+    keys2: List[str] = [raw_keys2] if isinstance(raw_keys2, str) else list(raw_keys2)
+
+    # CHANGE 2: Validate that every supplied key column exists in its DataFrame.
+    missing_1 = [c for c in (*keys1, *column_map.keys()) if c not in df1.columns]
+    missing_2 = [c for c in (*keys2, *column_map.values()) if c not in df2.columns]
     if missing_1:
         raise KeyError(f"df1 missing columns: {missing_1}")
     if missing_2:
         raise KeyError(f"df2 missing columns: {missing_2}")
 
-    # Define slim dataframes for merge
-    slim_df1 = df1[[key1] + list(column_map.keys())].copy()
-    slim_df2 = df2[[key2] + list(column_map.values())].copy()
+    # ------------------------------------------------------------------
+    # CHANGE 3: Normalise every key column in-place on the *original*
+    # DataFrames (str → strip → upper) so downstream code sees clean
+    # values, matching the requirement for in-place mutation.
+    # ------------------------------------------------------------------
+    for col in keys1:
+        df1[col] = df1[col].astype(str).str.strip().str.upper()
+    for col in keys2:
+        df2[col] = df2[col].astype(str).str.strip().str.upper()
 
-    # Normalize keys for joining to prevent formatting mismatches (leading zeros, case)
-    slim_df1[key1] = slim_df1[key1].astype(str).str.strip().str.upper()
-    slim_df2[key2] = slim_df2[key2].astype(str).str.strip().str.upper()
+    # ------------------------------------------------------------------
+    # CHANGE 4: Build the composite key column ``__comp_key`` on slim
+    # copies.  For a single key column this reduces to the value itself
+    # (no pipe separator), preserving exact backward-compatible output.
+    # ------------------------------------------------------------------
+    COMP_KEY = "__comp_key"
 
-    # Generate a unique temp key for Source B to avoid collisions with comparison columns
-    # Follow Rule 7: Rename on slim_df2 only, never inserted into slim_df1
+    slim_df1 = df1[keys1 + list(column_map.keys())].copy()
+    slim_df2 = df2[keys2 + list(column_map.values())].copy()
+
+    # Concatenate multiple key columns with "|"; single-column keys
+    # produce the value as-is (no trailing separator).
+    slim_df1[COMP_KEY] = slim_df1[keys1].apply(
+        lambda row: "|".join(row.values.astype(str)), axis=1
+    )
+    slim_df2[COMP_KEY] = slim_df2[keys2].apply(
+        lambda row: "|".join(row.values.astype(str)), axis=1
+    )
+
+    # Drop the individual key columns from the slim frames; the merge
+    # will use only the composite key column.
+    slim_df1 = slim_df1.drop(columns=keys1)
+    slim_df2 = slim_df2.drop(columns=keys2)
+
+    # Generate a unique temp key for Source B to avoid collisions with
+    # comparison columns (same pattern as before, just now on __comp_key).
     temp_key = f"_m_{uuid.uuid4().hex[:6]}"
-    slim_df2 = slim_df2.rename(columns={key2: temp_key})
+    slim_df2 = slim_df2.rename(columns={COMP_KEY: temp_key})
 
-    # Merge on the keys
-    # Follow Rule 6: suffixes=('_df1', '_df2')
+    # ------------------------------------------------------------------
+    # CHANGE 5: Merge using the composite key column.
+    # The rest of the merge logic is identical to the original.
+    # ------------------------------------------------------------------
     merged = pd.merge(
         slim_df1,
         slim_df2,
-        left_on=key1,
+        left_on=COMP_KEY,
         right_on=temp_key,
         how='outer',
         indicator='_merge',
         suffixes=('_df1', '_df2')
     )
-    
+
     diffs = []
     coercion_log: List[str] = []
 
@@ -300,7 +360,8 @@ def compare_records(
     left_only = merged[merged['_merge'] == 'left_only']
     if not left_only.empty:
         diffs.append(pd.DataFrame({
-            'key_df1': left_only[key1],
+            # CHANGE 6: key_df1/key_df2 carry the composite key string.
+            'key_df1': left_only[COMP_KEY],
             'key_df2': '<MISSING>',
             'col_df1': '<ROW MISSING>',
             'col_df2': '<ROW MISSING>',
@@ -314,6 +375,7 @@ def compare_records(
     if not right_only.empty:
         diffs.append(pd.DataFrame({
             'key_df1': '<MISSING>',
+            # CHANGE 6 (cont.): right_only rows use the temp_key column.
             'key_df2': right_only[temp_key],
             'col_df1': '<ROW MISSING>',
             'col_df2': '<ROW MISSING>',
@@ -348,7 +410,8 @@ def compare_records(
         if mask.any():
             # Filter the merged dataframe for just these mismatches among 'both' records
             mismatched_indices = mask[mask].index
-            part = merged.loc[mismatched_indices, [key1, temp_key, c1_name, c2_name]].copy()
+            # CHANGE 6 (cont.): pull composite key columns into the output part.
+            part = merged.loc[mismatched_indices, [COMP_KEY, temp_key, c1_name, c2_name]].copy()
             
             match_types = []
             for idx, row in part.iterrows():
@@ -361,7 +424,7 @@ def compare_records(
 
             part.rename(
                 columns={
-                    key1: 'key_df1',
+                    COMP_KEY: 'key_df1',
                     temp_key: 'key_df2',
                     c1_name: 'val_df1',
                     c2_name: 'val_df2'
@@ -382,6 +445,15 @@ def compare_records(
         results = pd.DataFrame(
             columns=['key_df1', 'key_df2', 'col_df1', 'col_df2', 'val_df1', 'val_df2', 'match_type']
         )
+
+    # ------------------------------------------------------------------
+    # CHANGE 7: Drop the temporary ``__comp_key`` column from the original
+    # DataFrames to avoid side-effects on the caller's data.
+    # (slim_df1 / slim_df2 are local copies so they need no cleanup.)
+    # ------------------------------------------------------------------
+    for frame in (df1, df2):
+        if COMP_KEY in frame.columns:
+            frame.drop(columns=[COMP_KEY], inplace=True)
 
     # Write to CSV if requested and mismatches exist
     if output_path and not results.empty:
