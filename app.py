@@ -153,6 +153,8 @@ def init_session_state():
         st.session_state.source_b_type_control = "File Upload"
 
     # UX-03: Track user-initiated clearing of files
+    if "uploaded_files" not in st.session_state:
+        st.session_state.uploaded_files = {}
     if "user_cleared_file_a" not in st.session_state:
         st.session_state.user_cleared_file_a = False
     if "user_cleared_file_b" not in st.session_state:
@@ -164,10 +166,8 @@ def init_session_state():
         st.session_state.col_pairs = []
     if "composite_map" not in st.session_state:
         st.session_state.composite_map = []
-    if "key_col_a" not in st.session_state:
-        st.session_state.key_col_a = None
-    if "key_col_b" not in st.session_state:
-        st.session_state.key_col_b = None
+    if "key_col_pairs" not in st.session_state:
+        st.session_state.key_col_pairs = []
     if "approach" not in st.session_state:
         st.session_state.approach = None
     if "results" not in st.session_state:
@@ -275,13 +275,13 @@ def render_sidebar():
 
 def on_uploader_a_change():
     """Callback for Source A uploader to track manual clearing."""
-    if st.session_state.uploader_a is None:
+    if st.session_state.uploader_a is None and st.session_state.get("df_a") is not None:
         st.session_state.user_cleared_file_a = True
 
 
 def on_uploader_b_change():
     """Callback for Source B uploader to track manual clearing."""
-    if st.session_state.uploader_b is None:
+    if st.session_state.uploader_b is None and st.session_state.get("df_b") is not None:
         st.session_state.user_cleared_file_b = True
 
 
@@ -397,12 +397,18 @@ def render_source_uploaders():
             if file_a:
                 file_key = f"{file_a.name}_{file_a.size}"
                 if st.session_state.file_a_id != file_key:
-                    df_a = load_file(file_a)
-                    if df_a is not None:
-                        st.session_state.df_a = df_a
+                    if file_key in st.session_state.uploaded_files:
+                        # Restore from cache (survives theme-switch reruns)
+                        st.session_state.df_a = st.session_state.uploaded_files[file_key]
                         st.session_state.file_a_id = file_key
-                        st.session_state.col_pairs = []
-                        st.session_state.results = None
+                    else:
+                        df_a = load_file(file_a)
+                        if df_a is not None:
+                            st.session_state.uploaded_files[file_key] = df_a
+                            st.session_state.df_a = df_a
+                            st.session_state.file_a_id = file_key
+                            st.session_state.col_pairs = []
+                            st.session_state.results = None
                 st.session_state.user_cleared_file_a = False
 
             if st.session_state.user_cleared_file_a:
@@ -411,6 +417,10 @@ def render_source_uploaders():
                 st.session_state.col_pairs = []
                 st.session_state.results = None
                 st.session_state.user_cleared_file_a = False
+                st.session_state.uploaded_files.pop(
+                    next((k for k in st.session_state.uploaded_files
+                          if k.startswith(str(st.session_state.get("file_a_id", ""))[:20] or "")),
+                         ""), None)
                 st.rerun()
                 
             if st.session_state.df_a is not None and not str(st.session_state.file_a_id).startswith("db_"):
@@ -454,12 +464,18 @@ def render_source_uploaders():
             if file_b:
                 file_key = f"{file_b.name}_{file_b.size}"
                 if st.session_state.file_b_id != file_key:
-                    df_b = load_file(file_b)
-                    if df_b is not None:
-                        st.session_state.df_b = df_b
+                    if file_key in st.session_state.uploaded_files:
+                        # Restore from cache (survives theme-switch reruns)
+                        st.session_state.df_b = st.session_state.uploaded_files[file_key]
                         st.session_state.file_b_id = file_key
-                        st.session_state.col_pairs = []
-                        st.session_state.results = None
+                    else:
+                        df_b = load_file(file_b)
+                        if df_b is not None:
+                            st.session_state.uploaded_files[file_key] = df_b
+                            st.session_state.df_b = df_b
+                            st.session_state.file_b_id = file_key
+                            st.session_state.col_pairs = []
+                            st.session_state.results = None
                 st.session_state.user_cleared_file_b = False
 
             if st.session_state.user_cleared_file_b:
@@ -468,6 +484,10 @@ def render_source_uploaders():
                 st.session_state.col_pairs = []
                 st.session_state.results = None
                 st.session_state.user_cleared_file_b = False
+                st.session_state.uploaded_files.pop(
+                    next((k for k in st.session_state.uploaded_files
+                          if k.startswith(str(st.session_state.get("file_b_id", ""))[:20] or "")),
+                         ""), None)
                 st.rerun()
                 
             if st.session_state.df_b is not None and not str(st.session_state.file_b_id).startswith("db_"):
@@ -499,30 +519,55 @@ def render_column_mapping():
     cols_a = [""] + list(st.session_state.df_a.columns)
     cols_b = [""] + list(st.session_state.df_b.columns)
 
-    # UX-04: Key Column Selectors at the TOP
-    st.subheader("Key Columns")
+    st.subheader("🔑 Key Columns")
     st.caption(
-        "Select the column that uniquely identifies each record in both sources"
+        "Define the column(s) that uniquely identify records. "
+        "Add multiple rows for composite keys (e.g., ID + Year + Term). "
+        "Key columns are auto-excluded from comparison pairs below."
     )
-    
-    col_key_a, col_key_b = st.columns([1, 1])
-    
-    with col_key_a:
-        st.selectbox(
-            "Key Column — Source A",
-            cols_a,
-            index=cols_a.index(st.session_state.key_col_a) if st.session_state.key_col_a in cols_a else 0,
-            key="key_col_a"
-        )
-    
-    with col_key_b:
-        st.selectbox(
-            "Key Column — Source B",
-            cols_b,
-            index=cols_b.index(st.session_state.key_col_b) if st.session_state.key_col_b in cols_b else 0,
-            key="key_col_b"
-        )
-    
+
+    # Display existing key pairs
+    for pair in st.session_state.key_col_pairs:
+        if "id" not in pair:
+            pair["id"] = str(uuid.uuid4())
+        pid = pair["id"]
+        col1, col2, col3 = st.columns([5, 5, 1])
+
+        with col1:
+            selected_a = st.selectbox(
+                "Source A Key Column",
+                cols_a,
+                index=cols_a.index(pair["a"]) if pair["a"] in cols_a else 0,
+                key=f"key_a_{pid}",
+                label_visibility="collapsed"
+            )
+            pair["a"] = selected_a
+
+        with col2:
+            selected_b = st.selectbox(
+                "Source B Key Column",
+                cols_b,
+                index=cols_b.index(pair["b"]) if pair["b"] in cols_b else 0,
+                key=f"key_b_{pid}",
+                label_visibility="collapsed"
+            )
+            pair["b"] = selected_b
+
+        with col3:
+            if st.button("✕", key=f"remove_key_{pid}"):
+                st.session_state.key_col_pairs = [
+                    p for p in st.session_state.key_col_pairs if p["id"] != pid
+                ]
+                st.rerun()
+
+    # Add key pair button
+    if st.button("➕ Add Key Pair"):
+        st.session_state.key_col_pairs.append({"id": str(uuid.uuid4()), "a": "", "b": ""})
+        st.rerun()
+
+    if not st.session_state.key_col_pairs:
+        st.info("Add at least one key pair to define record identity.")
+
     st.divider()
     
     # ========== REACTIVE SUGGESTION TRIGGER ==========
@@ -573,11 +618,18 @@ def render_column_mapping():
     # ========== COLUMN PAIRS BUILDER (APPROACHES 1 & 2) ==========
     st.subheader("Column Pairs")
     
-    # Auto-strip keys from pairs if they are selected as keys
-    ka = st.session_state.key_col_a
-    kb = st.session_state.key_col_b
-    filtered_pairs = [p for p in st.session_state.col_pairs if not (p["a"] == ka or p["b"] == kb)]
+    # Auto-strip key cols from column pairs
+    key_a_cols_stripped = [p["a"] for p in st.session_state.key_col_pairs if p.get("a")]
+    key_b_cols_stripped = [p["b"] for p in st.session_state.key_col_pairs if p.get("b")]
+    filtered_pairs = [
+        p for p in st.session_state.col_pairs
+        if p["a"] not in key_a_cols_stripped and p["b"] not in key_b_cols_stripped
+    ]
     if len(filtered_pairs) != len(st.session_state.col_pairs):
+        stripped_cols = [p["a"] for p in st.session_state.col_pairs if p not in filtered_pairs]
+        for c in stripped_cols:
+            if c:
+                st.toast(f"Removed key column '{c}' from comparison pairs.", icon="🔑")
         st.session_state.col_pairs = filtered_pairs
         st.rerun()
     
@@ -634,8 +686,14 @@ def render_column_mapping():
         "Each Source A column can match against multiple Source B columns"
     )
 
-    # Auto-strip keys from composite pairs
-    filtered_comp = [p for p in st.session_state.composite_map if not (p.get("a") == ka or kb in p.get("bs", []))]
+    # Auto-strip key cols from composite pairs
+    key_a_cols_comp = [p["a"] for p in st.session_state.key_col_pairs if p.get("a")]
+    key_b_cols_comp = [p["b"] for p in st.session_state.key_col_pairs if p.get("b")]
+    filtered_comp = [
+        p for p in st.session_state.composite_map
+        if p.get("a") not in key_a_cols_comp
+        and not any(b in key_b_cols_comp for b in p.get("bs", []))
+    ]
     if len(filtered_comp) != len(st.session_state.composite_map):
         st.session_state.composite_map = filtered_comp
         st.rerun()
@@ -853,40 +911,54 @@ def render_per_column_score_cards(per_column_scores: List[tuple[str, float]]):
         st.caption('Columns sorted by match rate — lowest first')
 
 
-def run_preflight_checks(df_a, df_b, key_col_a, key_col_b, complete_pairs, composite_pairs, approach):
+def run_preflight_checks(df_a, df_b, key_a_cols, key_b_cols, complete_pairs, composite_pairs, approach):
     """Run pre-flight validation checks before execution."""
     errors = []
     warnings = []
     
     # Check 1 — Key column uniqueness
-    for df, col in [(df_a, key_col_a), (df_b, key_col_b)]:
-        ratio = df[col].nunique() / len(df)
-        if ratio < 0.10:
-            errors.append(
-                f"Key column '{col}' is only {ratio*100:.1f}% unique — "
-                f"risk of incorrect matching. Use Identification Number or Student PID."
-            )
-        
-        # Entropy Check (Sequence detection)
-        if pd.api.types.is_numeric_dtype(df[col]):
-            diffs = df[col].sort_values().diff().dropna()
-            if (diffs == 1).mean() > 0.95:
-                warnings.append(
-                    f"Key column '{col}' appears to be a simple sequence (1, 2, 3...). "
-                    f"If one source has a header offset, the entire comparison will fail."
+    # Check 1 — Key column uniqueness (composite-aware)
+    for i, (df, cols) in enumerate([(df_a, key_a_cols), (df_b, key_b_cols)]):
+        if len(cols) == 1:
+            col = cols[0]
+            ratio = df[col].nunique() / len(df)
+            if ratio < 0.10:
+                errors.append(
+                    f"Key column '{col}' is only {ratio*100:.1f}% unique — "
+                    f"risk of incorrect matching. Use Identification Number or Student PID."
+                )
+            # Entropy Check (Sequence detection) — single numeric key only
+            if pd.api.types.is_numeric_dtype(df[col]):
+                diffs = df[col].sort_values().diff().dropna()
+                if (diffs == 1).mean() > 0.95:
+                    warnings.append(
+                        f"Key column '{col}' appears to be a simple sequence (1, 2, 3...). "
+                        f"If one source has a header offset, the entire comparison will fail."
+                    )
+        else:
+            # Composite key: check tuple-wise uniqueness
+            comp_ratio = df[cols].drop_duplicates().shape[0] / len(df)
+            if comp_ratio < 0.10:
+                errors.append(
+                    f"Composite key {cols} is only {comp_ratio*100:.1f}% unique — "
+                    f"risk of incorrect matching. Verify your key columns."
                 )
 
     # Check 2 — Key column in column pairs
     if approach == "Approach 2 — Record-Level Comparison":
-        if any(p["a"] == key_col_a for p in complete_pairs):
-            errors.append(f"Key column '{key_col_a}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
-        if any(p["b"] == key_col_b for p in complete_pairs):
-            errors.append(f"Key column '{key_col_b}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
+        for ka in key_a_cols:
+            if any(p["a"] == ka for p in complete_pairs):
+                errors.append(f"Key column '{ka}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
+        for kb in key_b_cols:
+            if any(p["b"] == kb for p in complete_pairs):
+                errors.append(f"Key column '{kb}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
     elif approach == "Approach 3 — Composite Comparison":
-        if any(p["a"] == key_col_a for p in composite_pairs):
-            errors.append(f"Key column '{key_col_a}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
-        if any(key_col_b in p["bs"] for p in composite_pairs):
-            errors.append(f"Key column '{key_col_b}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
+        for ka in key_a_cols:
+            if any(p["a"] == ka for p in composite_pairs):
+                errors.append(f"Key column '{ka}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
+        for kb in key_b_cols:
+            if any(kb in p["bs"] for p in composite_pairs):
+                errors.append(f"Key column '{kb}' is also mapped as a comparison column. Remove it from Column Pairs — it is already the join key.")
 
     # Check 3 — Duplicate target columns
     if approach == "Approach 2 — Record-Level Comparison":
@@ -909,9 +981,14 @@ def run_preflight_checks(df_a, df_b, key_col_a, key_col_b, complete_pairs, compo
     if n > 20:
         warnings.append(f"{n} column pairs selected. Consider reducing to key analytical fields first — large comparisons on big datasets may be slow.")
 
-    # Check 6 — Estimated merge size warning (Refined for unique keys)
-    ratio_a = df_a[key_col_a].nunique() / len(df_a)
-    ratio_b = df_b[key_col_b].nunique() / len(df_b)
+    # Check 6 — Estimated merge size warning (composite-aware)
+    def _comp_uniqueness(df, cols):
+        if len(cols) == 1:
+            return df[cols[0]].nunique() / len(df)
+        return df[cols].drop_duplicates().shape[0] / len(df)
+
+    ratio_a = _comp_uniqueness(df_a, key_a_cols)
+    ratio_b = _comp_uniqueness(df_b, key_b_cols)
     
     if ratio_a < 0.9 or ratio_b < 0.9:
         estimated_rows = len(df_a) * len(df_b)
@@ -944,20 +1021,21 @@ def render_validation_approaches():
     # ===== VALIDATION GATE =====
     df_a = st.session_state.df_a
     df_b = st.session_state.df_b
-    key_col_a = st.session_state.key_col_a
-    key_col_b = st.session_state.key_col_b
+    # Extract key column lists from key_col_pairs
+    key_a_cols = [p["a"] for p in st.session_state.key_col_pairs if p.get("a")]
+    key_b_cols = [p["b"] for p in st.session_state.key_col_pairs if p.get("b")]
     approach = st.session_state.approach
     
     # Check basic requirements
     if df_a is None or df_b is None:
         return
     
-    if key_col_a is None or key_col_a == "":
-        st.info("Please select source A key column to continue")
+    if not key_a_cols:
+        st.info("Please select at least one source A key column to continue")
         return
-    
-    if key_col_b is None or key_col_b == "":
-        st.info("Please select source B key column to continue")
+
+    if not key_b_cols:
+        st.info("Please select at least one source B key column to continue")
         return
     
     if approach is None:
@@ -973,7 +1051,7 @@ def render_validation_approaches():
         )
     
     # Normalize keys for the union count to ensure identity consistency with merge logic (Rule 6)
-    total_keys = calculate_union_count(df_a, df_b, key_col_a, key_col_b)
+    total_keys = calculate_union_count(df_a, df_b, key_a_cols, key_b_cols)
 
     # Check for approach-specific requirements
     complete_pairs = [
@@ -1002,7 +1080,7 @@ def render_validation_approaches():
     is_safe = True
     if approach in ["Approach 2 — Record-Level Comparison", "Approach 3 — Composite Comparison"]:
         is_safe, _, _ = run_preflight_checks(
-            df_a, df_b, key_col_a, key_col_b, 
+            df_a, df_b, key_a_cols, key_b_cols, 
             complete_pairs, composite_pairs, approach
         )
     
@@ -1119,7 +1197,7 @@ def render_validation_approaches():
                 st.text(f"  {pair['a']} → {pair['b']}")
         
         # Show key pair
-        st.info(f"Matching on: {key_col_a}  {key_col_b}")
+        st.info(f"Matching on A: {', '.join(key_a_cols)} | B: {', '.join(key_b_cols)}")
         st.info(
             f"Ready to compare {len(df_a):,} Source A records against {len(df_b):,} "
             f"Source B records across {len(complete_pairs)} column pairs."
@@ -1137,7 +1215,7 @@ def render_validation_approaches():
             col_map = {
                 col_a: col_b
                 for col_a, col_b in col_map.items()
-                if col_a != key_col_a and col_b != key_col_b
+                if col_a not in key_a_cols and col_b not in key_b_cols
             }
             
             with st.status("Running comparison...", expanded=True) as status:
@@ -1146,7 +1224,7 @@ def render_validation_approaches():
                     results_df, coercion_log = compare_records(
                         df1=df_a,
                         df2=df_b,
-                        key_map=(key_col_a, key_col_b),
+                        key_map=(key_a_cols, key_b_cols),
                         column_map=col_map,
                         output_path=None,
                         ask_before_write=False
@@ -1184,8 +1262,10 @@ def render_validation_approaches():
             
             # Count records present in both (Intersection)
             # Normalize locally to ensure joined_count is accurate to the matching Rule 6
-            norm_a = df_a[key_col_a].astype(str).str.strip().str.upper()
-            norm_b = df_b[key_col_b].astype(str).str.strip().str.upper()
+            def _mk_comp_key(df, cols):
+                return df[cols].astype(str).apply("|".join, axis=1).str.strip().str.upper()
+            norm_a = _mk_comp_key(df_a, key_a_cols)
+            norm_b = _mk_comp_key(df_b, key_b_cols)
             joined_count = len(set(norm_a) & set(norm_b))
             
             score = calculate_match_score(results["data"], total_keys)
@@ -1315,7 +1395,7 @@ def render_validation_approaches():
                 st.text(f"  {pair['a']} → [{targets}]")
         
         # Show key pair
-        st.info(f"Matching on: {key_col_a}  {key_col_b}")
+        st.info(f"Matching on A: {', '.join(key_a_cols)} | B: {', '.join(key_b_cols)}")
         st.info(
             f"Ready to compare {len(df_a):,} Source A records against {len(df_b):,} "
             f"Source B records across {len(composite_pairs)} composite mappings."
@@ -1331,9 +1411,9 @@ def render_validation_approaches():
             
             # ADDITION 4: Auto-strip key columns from composite pairs
             comp_map = {
-                col_a: [col_b for col_b in col_bs if col_b != key_col_b]
+                col_a: [col_b for col_b in col_bs if col_b not in key_b_cols]
                 for col_a, col_bs in comp_map.items()
-                if col_a != key_col_a
+                if col_a not in key_a_cols
             }
             # Remove empty entries
             comp_map = {k: v for k, v in comp_map.items() if v}
@@ -1344,7 +1424,7 @@ def render_validation_approaches():
                     results_df, coercion_log = compare_composite_records(
                         df1=df_a,
                         df2=df_b,
-                        key_map=(key_col_a, key_col_b),
+                        key_map=(key_a_cols, key_b_cols),
                         column_map=comp_map,
                         output_path=None,
                         ask_before_write=False
@@ -1375,8 +1455,10 @@ def render_validation_approaches():
             score = calculate_match_score(results["data"], total_keys)
             
             # Intersection for Approach 3
-            norm_a = df_a[key_col_a].astype(str).str.strip().str.upper()
-            norm_b = df_b[key_col_b].astype(str).str.strip().str.upper()
+            def _mk_comp_key(df, cols):
+                return df[cols].astype(str).apply("|".join, axis=1).str.strip().str.upper()
+            norm_a = _mk_comp_key(df_a, key_a_cols)
+            norm_b = _mk_comp_key(df_b, key_b_cols)
             joined_count = len(set(norm_a) & set(norm_b))
 
             # RESULTS-01 & 04: Summary Coverage Metrics

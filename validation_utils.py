@@ -465,13 +465,18 @@ def compare_records(
         if should_write:
             results.to_csv(output_path, index=False)
 
+    # Drop the temporary __comp_key column from original DataFrames
+    for frame in (df1, df2):
+        if COMP_KEY in frame.columns:
+            frame.drop(columns=[COMP_KEY], inplace=True)
+
     return results, coercion_log
 
 
 def compare_composite_records(
     df1: pd.DataFrame,
     df2: pd.DataFrame,
-    key_map: Tuple[str, str],
+    key_map: Union[Tuple[str, str], Tuple[List[str], List[str]]],
     column_map: Dict[str, Union[str, List[str]]],
     output_path: Optional[str] = None,
     ask_before_write: bool = False
@@ -542,7 +547,9 @@ def compare_composite_records(
     >>> diffs = compare_composite_records(df_excel, df_db, key, cols)
     >>> print(diffs)  # Shows majors that don't match any degree type
     """
-    key1, key2 = key_map
+    raw_keys1, raw_keys2 = key_map
+    keys1: List[str] = [raw_keys1] if isinstance(raw_keys1, str) else list(raw_keys1)
+    keys2: List[str] = [raw_keys2] if isinstance(raw_keys2, str) else list(raw_keys2)
 
     # Flatten all target columns for existence checks
     values_flat = [
@@ -552,11 +559,11 @@ def compare_composite_records(
 
     # Verify column existence
     missing_1 = [
-        c for c in (key1, *column_map.keys())
+        c for c in (*keys1, *column_map.keys())
         if c not in df1.columns
     ]
     missing_2 = [
-        c for c in (key2, *values_flat)
+        c for c in (*keys2, *values_flat)
         if c not in df2.columns
     ]
     if missing_1:
@@ -569,24 +576,36 @@ def compare_composite_records(
         for c in (v if isinstance(v, list) else [v])
     ]
 
-    slim_df1 = df1[[key1] + list(column_map.keys())].copy()
-    slim_df2 = df2[[key2] + flat_targets].copy()
+    # Normalise every key column in-place
+    for col in keys1:
+        df1[col] = df1[col].astype(str).str.strip().str.upper()
+    for col in keys2:
+        df2[col] = df2[col].astype(str).str.strip().str.upper()
 
-    # FIX 3: Key normalization (Rule 6)
-    slim_df1[key1] = slim_df1[key1].astype(str).str.strip().str.upper()
-    slim_df2[key2] = slim_df2[key2].astype(str).str.strip().str.upper()
+    # Build slim copies with a composite key column
+    COMP_KEY = "__comp_key"
+    slim_df1 = df1[keys1 + list(column_map.keys())].copy()
+    slim_df2 = df2[keys2 + flat_targets].copy()
+
+    slim_df1[COMP_KEY] = slim_df1[keys1].apply(
+        lambda row: "|".join(row.values.astype(str)), axis=1
+    )
+    slim_df2[COMP_KEY] = slim_df2[keys2].apply(
+        lambda row: "|".join(row.values.astype(str)), axis=1
+    )
+
+    slim_df1 = slim_df1.drop(columns=keys1)
+    slim_df2 = slim_df2.drop(columns=keys2)
 
     # Generate a unique temp key for Source B to avoid collisions with comparison columns
-    # Follow Rule 7: Rename on slim_df2 only, never inserted into slim_df1
     temp_key = f"_m_{uuid.uuid4().hex[:8]}"
-    slim_df2 = slim_df2.rename(columns={key2: temp_key})
+    slim_df2 = slim_df2.rename(columns={COMP_KEY: temp_key})
 
-    # Merge on the keys
-    # Follow Rule 5: suffixes=('_df1', '_df2')
+    # Merge on the composite key
     merged = pd.merge(
         slim_df1,
         slim_df2,
-        left_on=key1,
+        left_on=COMP_KEY,
         right_on=temp_key,
         how='outer',
         indicator='_merge',
@@ -600,7 +619,7 @@ def compare_composite_records(
     left_only = merged[merged['_merge'] == 'left_only']
     if not left_only.empty:
         missing_in_b = pd.DataFrame({
-            'key_df1': left_only[key1],
+            'key_df1': left_only[COMP_KEY],
             'key_df2': '<MISSING>',
             'col_df1': '<ROW MISSING>',
             'col_df2': '<ROW MISSING>',
@@ -666,13 +685,13 @@ def compare_composite_records(
             # Build mismatch rows only for failed records
             if len(mismatched_indices) > 0:
                 for col2 in targets:
-                    part = merged.loc[mismatched_indices, [key1, temp_key]].copy()
+                    part = merged.loc[mismatched_indices, [COMP_KEY, temp_key]].copy()
                     part['col_df1'] = col1
                     part['col_df2'] = col2
                     part['val_df1'] = merged.loc[mismatched_indices, col1].values
                     part['val_df2'] = merged.loc[mismatched_indices, col2].values
                     part['comparison_type'] = f"{col1} vs {col2}"
-                    part = part.rename(columns={key1: 'key_df1', temp_key: 'key_df2'})
+                    part = part.rename(columns={COMP_KEY: 'key_df1', temp_key: 'key_df2'})
                     diffs.append(
                         part[['key_df1','key_df2','col_df1','col_df2',
                               'val_df1','val_df2','comparison_type']]
@@ -693,10 +712,10 @@ def compare_composite_records(
 
             if mask.any():
                 mismatched_indices = mask[mask].index
-                part = merged.loc[mismatched_indices, [key1, temp_key, col1, col2]].copy()
+                part = merged.loc[mismatched_indices, [COMP_KEY, temp_key, col1, col2]].copy()
                 part.rename(
                     columns={
-                        key1: 'key_df1',
+                        COMP_KEY: 'key_df1',
                         temp_key: 'key_df2',
                         col1: 'val_df1',
                         col2: 'val_df2'
@@ -731,5 +750,10 @@ def compare_composite_records(
         
         if should_write:
             results.to_csv(output_path, index=False)
+
+    # Drop the temporary __comp_key column from original DataFrames
+    for frame in (df1, df2):
+        if COMP_KEY in frame.columns:
+            frame.drop(columns=[COMP_KEY], inplace=True)
 
     return results, coercion_log

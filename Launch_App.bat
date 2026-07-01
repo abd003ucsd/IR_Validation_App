@@ -1,7 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
 
-<<<<<<< HEAD
 REM FIX (ISSUE 3): Enable ANSI Escape Code support for colored output
 reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>nul
 for /f %%a in ('echo prompt $E^| cmd') do set "ESC=%%a"
@@ -47,42 +46,6 @@ REM FIX (ISSUE 1): Use pushd for reliable navigation on network/Q: drives.
 pushd "%~dp0"
 
 REM 1. Prefer bundled virtual environment
-=======
-:: Break recursion — if already been through runas, skip to launch
-if exist "%~dp0.app_launch_flag" (
-    del "%~dp0.app_launch_flag"
-    goto ENV_CHECK
-)
-
-:: Derive and confirm -app username
-set "APP_USER=%USERNAME%-app"
-echo [INFO] Database access requires your -app account.
-set /p CONFIRM="Detected: AD\%APP_USER% — Press Enter to confirm or type a different username: "
-if not "%CONFIRM%"=="" set "APP_USER=%CONFIRM%"
-
-echo [INFO] Launching as AD\%APP_USER%...
-echo You will be prompted for your -app password.
-echo.
-
-:: Create flag before runas so the new process skips Step 1
-echo. > "%~dp0.app_launch_flag"
-
-runas /netonly /user:AD\%APP_USER% ^
-    "cmd /k cd /d %~dp0 && %~dp0Launch_App.bat"
-
-if %ERRORLEVEL% neq 0 (
-    del "%~dp0.app_launch_flag" >nul 2>nul
-    echo.
-    echo [ERROR] Launch failed. Common causes:
-    echo   - Incorrect -app password
-    echo   - AD\%APP_USER% does not exist
-    echo.
-    pause
-)
-exit /b
-
-:ENV_CHECK
->>>>>>> origin/main
 if exist "env\Scripts\python.exe" (
     "env\Scripts\python.exe" -c "import streamlit" >nul 2>nul
     if !ERRORLEVEL! equ 0 (

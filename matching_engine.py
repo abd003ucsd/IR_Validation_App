@@ -150,8 +150,17 @@ def check_ollama() -> bool:
 
 
 @st.cache_data
-def calculate_union_count(df_a: pd.DataFrame, df_b: pd.DataFrame, key_a: str, key_b: str) -> int:
-    """Return the number of unique keys across both dataframes."""
-    normalized_keys_a = df_a[key_a].astype(str).str.strip().str.upper()
-    normalized_keys_b = df_b[key_b].astype(str).str.strip().str.upper()
+def calculate_union_count(df_a: pd.DataFrame, df_b: pd.DataFrame, key_a, key_b) -> int:
+    """Return the number of unique keys across both dataframes.
+
+    Supports both single-key (str) and composite-key (list of str) arguments.
+    """
+    keys_a = [key_a] if isinstance(key_a, str) else list(key_a)
+    keys_b = [key_b] if isinstance(key_b, str) else list(key_b)
+
+    def _mk_key(df, cols):
+        return df[cols].astype(str).apply("|".join, axis=1).str.strip().str.upper()
+
+    normalized_keys_a = _mk_key(df_a, keys_a)
+    normalized_keys_b = _mk_key(df_b, keys_b)
     return int(pd.concat([normalized_keys_a, normalized_keys_b]).nunique())
