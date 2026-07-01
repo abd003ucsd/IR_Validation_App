@@ -1,6 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 
+<<<<<<< HEAD
 REM FIX (ISSUE 3): Enable ANSI Escape Code support for colored output
 reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>nul
 for /f %%a in ('echo prompt $E^| cmd') do set "ESC=%%a"
@@ -46,6 +47,42 @@ REM FIX (ISSUE 1): Use pushd for reliable navigation on network/Q: drives.
 pushd "%~dp0"
 
 REM 1. Prefer bundled virtual environment
+=======
+:: Break recursion — if already been through runas, skip to launch
+if exist "%~dp0.app_launch_flag" (
+    del "%~dp0.app_launch_flag"
+    goto ENV_CHECK
+)
+
+:: Derive and confirm -app username
+set "APP_USER=%USERNAME%-app"
+echo [INFO] Database access requires your -app account.
+set /p CONFIRM="Detected: AD\%APP_USER% — Press Enter to confirm or type a different username: "
+if not "%CONFIRM%"=="" set "APP_USER=%CONFIRM%"
+
+echo [INFO] Launching as AD\%APP_USER%...
+echo You will be prompted for your -app password.
+echo.
+
+:: Create flag before runas so the new process skips Step 1
+echo. > "%~dp0.app_launch_flag"
+
+runas /netonly /user:AD\%APP_USER% ^
+    "cmd /k cd /d %~dp0 && %~dp0Launch_App.bat"
+
+if %ERRORLEVEL% neq 0 (
+    del "%~dp0.app_launch_flag" >nul 2>nul
+    echo.
+    echo [ERROR] Launch failed. Common causes:
+    echo   - Incorrect -app password
+    echo   - AD\%APP_USER% does not exist
+    echo.
+    pause
+)
+exit /b
+
+:ENV_CHECK
+>>>>>>> origin/main
 if exist "env\Scripts\python.exe" (
     "env\Scripts\python.exe" -c "import streamlit" >nul 2>nul
     if !ERRORLEVEL! equ 0 (
@@ -54,28 +91,37 @@ if exist "env\Scripts\python.exe" (
     )
 )
 
+<<<<<<< HEAD
 REM 2. Try system Python via py launcher
+=======
+>>>>>>> origin/main
 py -3 -c "import streamlit" >nul 2>nul
 if !ERRORLEVEL! equ 0 (
     set "PY_CMD=py -3"
     goto LAUNCH
 )
 
+<<<<<<< HEAD
 REM 3. Try system Python directly
+=======
+>>>>>>> origin/main
 python -c "import streamlit" >nul 2>nul
 if !ERRORLEVEL! equ 0 (
     set "PY_CMD=python"
     goto LAUNCH
 )
 
+<<<<<<< HEAD
 REM FIX (ISSUE 3): RED for [ERROR]
 echo %RED%[ERROR]%RESET% Could not find a usable Python environment.
 echo.
 echo   - Virtual env (env\) was not found or is missing Streamlit
 echo   - No system Python with Streamlit detected
 echo.
+=======
+echo [ERROR] Could not find a usable Python environment.
+>>>>>>> origin/main
 echo Please run Setup_Environment.bat or contact the maintainer.
-echo.
 pause
 popd
 exit /b 1
@@ -84,6 +130,7 @@ exit /b 1
 REM FIX (ISSUE 3): YELLOW for [INFO]
 echo %YELLOW%[INFO]%RESET% Launching IR Data Validation Tool...
 %PY_CMD% -m streamlit run app.py
+<<<<<<< HEAD
 if !ERRORLEVEL! neq 0 (
     echo.
     REM FIX (ISSUE 3): RED for [ERROR]
@@ -92,3 +139,9 @@ if !ERRORLEVEL! neq 0 (
 )
 popd
 exit /b 0
+=======
+if %ERRORLEVEL% neq 0 (
+    echo [ERROR] Application failed to start.
+    pause
+)
+>>>>>>> origin/main
