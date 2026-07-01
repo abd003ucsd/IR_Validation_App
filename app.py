@@ -168,6 +168,10 @@ def init_session_state():
         st.session_state.composite_map = []
     if "key_col_pairs" not in st.session_state:
         st.session_state.key_col_pairs = []
+    if "type_overrides_a" not in st.session_state:
+        st.session_state.type_overrides_a = {}
+    if "type_overrides_b" not in st.session_state:
+        st.session_state.type_overrides_b = {}
     if "approach" not in st.session_state:
         st.session_state.approach = None
     if "results" not in st.session_state:
@@ -734,7 +738,165 @@ def render_column_mapping():
         st.session_state.composite_map.append({"id": str(uuid.uuid4()), "a": "", "bs": []})
         st.rerun()
 
+    # Render column profiles below the mapping
+    render_column_profiles()
 
+
+
+# ============================================================
+# SECTION 6B: COLUMN PROFILES & TYPE COERCION
+# ============================================================
+
+def detect_mixed_types(series: pd.Series) -> bool:
+    """Return True if a series has a mix of numeric and non-numeric values."""
+    if pd.api.types.is_numeric_dtype(series.dtype):
+        return False
+    # Sample up to 10K to avoid OOM on huge datasets
+    sample = series.dropna().head(10000)
+    if len(sample) == 0:
+        return False
+    # Try numeric coercion — if some values parse and some don't, it's mixed
+    coerced = pd.to_numeric(sample, errors='coerce')
+    parsed = coerced.notna().sum()
+    unparsed = sample.notna().sum() - parsed
+    return parsed > 0 and unparsed > 0
+
+
+def profile_columns(df: pd.DataFrame, source_label: str):
+    """Display an interactive column profile with type warnings and coercion overrides."""
+    if df is None or df.empty:
+        return
+
+    override_key = "type_overrides_a" if "A" in source_label or "a" in source_label else "type_overrides_b"
+    overrides = st.session_state.get(override_key, {})
+
+    st.caption(f"**{source_label}** — {df.shape[1]} columns, {df.shape[0]:,} rows")
+
+    profile_data = []
+    for col in df.columns:
+        series = df[col]
+        null_pct = series.isna().mean() * 100
+        dtype_name = series.dtype.name
+        is_mixed = detect_mixed_types(series)
+
+        # Sample display
+        sample_vals = series.dropna().unique()[:3]
+        sample_str = ", ".join(str(v) for v in sample_vals) if len(sample_vals) > 0 else "(all null)"
+
+        profile_data.append({
+            "column": col,
+            "type": dtype_name,
+            "nulls": f"{null_pct:.1f}%",
+            "mixed": "⚠ Mixed" if is_mixed else "",
+            "_null_pct": null_pct,
+            "_is_mixed": is_mixed,
+        })
+
+    # Build the UI as an interactive table
+    for i, row in enumerate(profile_data):
+        col1, col2, col3, col4, col5, col6 = st.columns([3.5, 1.5, 1, 1.2, 2, 0.3])
+
+        with col1:
+            st.text(row["column"])
+
+        with col2:
+            if row["_is_mixed"]:
+                st.markdown(f"<span style='color:#FF8800'>{row['type']}</span>", unsafe_allow_html=True)
+            else:
+                st.text(row["type"])
+
+        with col3:
+            st.text(row["nulls"])
+
+        with col4:
+            if row["_is_mixed"]:
+                st.markdown(f"<span style='color:#FF8800'>{row['mixed']}</span>", unsafe_allow_html=True)
+
+        with col5:
+            col_name = row["column"]
+            current_override = overrides.get(col_name, "Auto")
+            type_opts = ["Auto", "Numeric", "String", "Integer", "Datetime"]
+            idx_opts = type_opts.index(current_override) if current_override in type_opts else 0
+            selected = st.selectbox(
+                "Force type",
+                options=type_opts,
+                index=idx_opts,
+                key=f"force_{override_key}_{col_name}",
+                label_visibility="collapsed"
+            )
+            if selected != current_override:
+                overrides[col_name] = selected
+                st.session_state[override_key] = overrides
+
+    # Summary stats
+    total_cols = len(profile_data)
+    mixed_cols = sum(1 for r in profile_data if r["_is_mixed"])
+    high_null_cols = sum(1 for r in profile_data if r["_null_pct"] > 50)
+
+    parts = []
+    if mixed_cols:
+        parts.append(f"{mixed_cols} mixed-type ⚠")
+    if high_null_cols:
+        parts.append(f"{high_null_cols} high-null")
+    if parts:
+        st.caption("Issues: " + ", ".join(parts))
+    else:
+        st.caption("No type issues detected — all columns clean.")
+
+
+def apply_type_overrides(df: pd.DataFrame, overrides: dict) -> pd.DataFrame:
+    """Apply user-selected type overrides to a DataFrame copy."""
+    if not overrides:
+        return df
+    df = df.copy()
+    for col, target_type in overrides.items():
+        if col not in df.columns or target_type == "Auto":
+            continue
+        try:
+            if target_type == "Numeric":
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            elif target_type == "String":
+                df[col] = df[col].astype(str)
+            elif target_type == "Integer":
+                # Float → nullable Int64 to handle NaNs
+                numeric = pd.to_numeric(df[col], errors='coerce')
+                df[col] = numeric.astype('Int64')
+            elif target_type == "Datetime":
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+        except Exception:
+            # Silently skip failed coercions — user can fix and re-run
+            pass
+    return df
+
+
+def render_column_profiles():
+    """Render column profiles for both sources when data is loaded."""
+    df_a = st.session_state.get("df_a")
+    df_b = st.session_state.get("df_b")
+
+    if df_a is None and df_b is None:
+        return
+
+    st.divider()
+    st.subheader("📊 Column Profiles")
+    st.caption(
+        "Review column types and null rates before validating. "
+        "Columns with mixed types are flagged — use the dropdown to force a type."
+    )
+
+    tab_a, tab_b = st.tabs(["Source A", "Source B"])
+
+    with tab_a:
+        if df_a is not None:
+            profile_columns(df_a, "Source A")
+        else:
+            st.caption("No data loaded.")
+
+    with tab_b:
+        if df_b is not None:
+            profile_columns(df_b, "Source B")
+        else:
+            st.caption("No data loaded.")
 # ============================================================
 # SECTION 7: APPROACH SELECTOR
 # ============================================================
@@ -1036,6 +1198,12 @@ def render_validation_approaches():
 
     if not key_b_cols:
         st.info("Please select at least one source B key column to continue")
+
+    # Apply user-selected type overrides before validation
+    if st.session_state.get("type_overrides_a"):
+        df_a = apply_type_overrides(df_a, st.session_state.type_overrides_a)
+    if st.session_state.get("type_overrides_b"):
+        df_b = apply_type_overrides(df_b, st.session_state.type_overrides_b)
         return
     
     if approach is None:
