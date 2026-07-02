@@ -212,7 +212,8 @@ def compare_records(
     key_map: Union[Tuple[str, str], Tuple[List[str], List[str]]],
     column_map: Dict[str, str],
     output_path: Optional[str] = None,
-    ask_before_write: bool = False
+    ask_before_write: bool = False,
+    case_sensitive: bool = False
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
     Row-level comparison of column pairs between two DataFrames (Approach 2).
@@ -306,9 +307,13 @@ def compare_records(
     # values, matching the requirement for in-place mutation.
     # ------------------------------------------------------------------
     for col in keys1:
-        df1[col] = df1[col].astype(str).str.strip().str.upper()
+        df1[col] = df1[col].astype(str).str.strip()
+        if not case_sensitive:
+            df1[col] = df1[col].str.upper()
     for col in keys2:
-        df2[col] = df2[col].astype(str).str.strip().str.upper()
+        df2[col] = df2[col].astype(str).str.strip()
+        if not case_sensitive:
+            df2[col] = df2[col].str.upper()
 
     # ------------------------------------------------------------------
     # CHANGE 4: Build the composite key column ``__comp_key`` on slim
@@ -479,7 +484,8 @@ def compare_composite_records(
     key_map: Union[Tuple[str, str], Tuple[List[str], List[str]]],
     column_map: Dict[str, Union[str, List[str]]],
     output_path: Optional[str] = None,
-    ask_before_write: bool = False
+    ask_before_write: bool = False,
+    case_sensitive: bool = False
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
     Advanced row-level comparison with multi-target alternative matching (Approach 3).
@@ -578,9 +584,13 @@ def compare_composite_records(
 
     # Normalise every key column in-place
     for col in keys1:
-        df1[col] = df1[col].astype(str).str.strip().str.upper()
+        df1[col] = df1[col].astype(str).str.strip()
+        if not case_sensitive:
+            df1[col] = df1[col].str.upper()
     for col in keys2:
-        df2[col] = df2[col].astype(str).str.strip().str.upper()
+        df2[col] = df2[col].astype(str).str.strip()
+        if not case_sensitive:
+            df2[col] = df2[col].str.upper()
 
     # Build slim copies with a composite key column
     COMP_KEY = "__comp_key"

@@ -180,6 +180,8 @@ def init_session_state():
         st.session_state.ollama_active = False
     if "threshold" not in st.session_state:
         st.session_state.threshold = 60
+    if "case_sensitive_keys" not in st.session_state:
+        st.session_state.case_sensitive_keys = False
 
 
 # ============================================================
@@ -262,6 +264,17 @@ def render_sidebar():
                 value=st.session_state.threshold if isinstance(st.session_state.threshold, float) else 0.75,
                 step=0.05
             )
+        
+        # Key normalization toggle
+        st.divider()
+        st.subheader("Key Matching")
+        st.toggle(
+            "Case Sensitive Keys",
+            value=st.session_state.case_sensitive_keys,
+            key="case_sensitive_keys",
+            help="When enabled, key values are matched exactly including case. "
+                 "When disabled (default), keys are normalized to uppercase for matching."
+        )
         
         st.divider()
         
@@ -523,6 +536,21 @@ def render_column_mapping():
     cols_a = [""] + list(st.session_state.df_a.columns)
     cols_b = [""] + list(st.session_state.df_b.columns)
 
+    # Auto-initialize one key pair if none exist when data loads
+    if not st.session_state.key_col_pairs:
+        # Try to find a common column name to pre-select as default key
+        common_cols = [c for c in st.session_state.df_a.columns
+                       if c in st.session_state.df_b.columns and c.strip()]
+        if common_cols:
+            # Use first common column
+            st.session_state.key_col_pairs.append(
+                {"id": str(uuid.uuid4()), "a": common_cols[0], "b": common_cols[0]}
+            )
+        else:
+            st.session_state.key_col_pairs.append(
+                {"id": str(uuid.uuid4()), "a": "", "b": ""}
+            )
+
     st.subheader("🔑 Key Columns")
     st.caption(
         "Define the column(s) that uniquely identify records. "
@@ -738,6 +766,77 @@ def render_column_mapping():
         st.session_state.composite_map.append({"id": str(uuid.uuid4()), "a": "", "bs": []})
         st.rerun()
 
+    # ========== MAPPING EXPORT / IMPORT ==========
+    st.divider()
+    st.subheader("Mapping Presets")
+    st.caption("Save or load your column mapping configuration for recurring validations.")
+
+    col_exp, col_imp = st.columns([1, 1])
+
+    with col_exp:
+        if st.button("💾 Save Mapping as JSON", key="export_mapping"):
+            mapping = {
+                "version": "1",
+                "key_col_pairs": [
+                    {"a": p["a"], "b": p["b"]}
+                    for p in st.session_state.key_col_pairs if p.get("a") and p.get("b")
+                ],
+                "col_pairs": [
+                    {"a": p["a"], "b": p["b"]}
+                    for p in st.session_state.col_pairs if p.get("a") and p.get("b")
+                ],
+                "composite_map": [
+                    {"a": p["a"], "bs": p["bs"]}
+                    for p in st.session_state.composite_map if p.get("a") and p.get("bs")
+                ]
+            }
+            mapping_json = json.dumps(mapping, indent=2)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            st.download_button(
+                label="Download Mapping File",
+                data=mapping_json,
+                file_name=f"ir_mapping_{ts}.json",
+                mime="application/json",
+                key="download_mapping",
+                type="primary"
+            )
+
+    with col_imp:
+        uploaded_mapping = st.file_uploader(
+            "Load Mapping JSON",
+            type=["json"],
+            key="upload_mapping",
+            label_visibility="collapsed"
+        )
+        if uploaded_mapping is not None:
+            try:
+                loaded = json.load(uploaded_mapping)
+                loaded_version = loaded.get("version", "0")
+
+                if loaded.get("key_col_pairs"):
+                    st.session_state.key_col_pairs = [
+                        {"id": str(uuid.uuid4()), "a": p["a"], "b": p["b"]}
+                        for p in loaded["key_col_pairs"]
+                    ]
+                if loaded.get("col_pairs"):
+                    st.session_state.col_pairs = [
+                        {"id": str(uuid.uuid4()), "a": p["a"], "b": p["b"]}
+                        for p in loaded["col_pairs"]
+                    ]
+                if loaded.get("composite_map"):
+                    st.session_state.composite_map = [
+                        {"id": str(uuid.uuid4()), "a": p["a"], "bs": p["bs"]}
+                        for p in loaded["composite_map"]
+                    ]
+
+                st.success(f"Mapping loaded: {len(st.session_state.key_col_pairs)} key pairs, "
+                           f"{len(st.session_state.col_pairs)} column pairs, "
+                           f"{len(st.session_state.composite_map)} composite pairs.")
+                st.session_state.results = None
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to load mapping: {str(e)}")
+
     # Render column profiles below the mapping
     render_column_profiles()
 
@@ -877,26 +976,24 @@ def render_column_profiles():
     if df_a is None and df_b is None:
         return
 
-    st.divider()
-    st.subheader("📊 Column Profiles")
-    st.caption(
-        "Review column types and null rates before validating. "
-        "Columns with mixed types are flagged — use the dropdown to force a type."
-    )
+    with st.expander("📊 Column Profiles & Type Coercion", expanded=False):
+        st.caption(
+            "Inspect column types and null rates. Use the dropdown to force a type "
+            "if a column has mixed values (flagged with ⚠)."
+        )
+        tab_a, tab_b = st.tabs(["Source A", "Source B"])
 
-    tab_a, tab_b = st.tabs(["Source A", "Source B"])
+        with tab_a:
+            if df_a is not None:
+                profile_columns(df_a, "Source A")
+            else:
+                st.caption("No data loaded.")
 
-    with tab_a:
-        if df_a is not None:
-            profile_columns(df_a, "Source A")
-        else:
-            st.caption("No data loaded.")
-
-    with tab_b:
-        if df_b is not None:
-            profile_columns(df_b, "Source B")
-        else:
-            st.caption("No data loaded.")
+        with tab_b:
+            if df_b is not None:
+                profile_columns(df_b, "Source B")
+            else:
+                st.caption("No data loaded.")
 # ============================================================
 # SECTION 7: APPROACH SELECTOR
 # ============================================================
@@ -1219,7 +1316,7 @@ def render_validation_approaches():
         )
     
     # Normalize keys for the union count to ensure identity consistency with merge logic (Rule 6)
-    total_keys = calculate_union_count(df_a, df_b, key_a_cols, key_b_cols)
+    total_keys = calculate_union_count(df_a, df_b, key_a_cols, key_b_cols, st.session_state.case_sensitive_keys)
 
     # Check for approach-specific requirements
     complete_pairs = [
@@ -1431,7 +1528,10 @@ def render_validation_approaches():
             # Count records present in both (Intersection)
             # Normalize locally to ensure joined_count is accurate to the matching Rule 6
             def _mk_comp_key(df, cols):
-                return df[cols].astype(str).apply("|".join, axis=1).str.strip().str.upper()
+                result = df[cols].astype(str).apply("|".join, axis=1).str.strip()
+                if not st.session_state.case_sensitive_keys:
+                    result = result.str.upper()
+                return result
             norm_a = _mk_comp_key(df_a, key_a_cols)
             norm_b = _mk_comp_key(df_b, key_b_cols)
             joined_count = len(set(norm_a) & set(norm_b))
@@ -1595,7 +1695,8 @@ def render_validation_approaches():
                         key_map=(key_a_cols, key_b_cols),
                         column_map=comp_map,
                         output_path=None,
-                        ask_before_write=False
+                        ask_before_write=False,
+                        case_sensitive=st.session_state.case_sensitive_keys
                     )
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     
@@ -1624,7 +1725,10 @@ def render_validation_approaches():
             
             # Intersection for Approach 3
             def _mk_comp_key(df, cols):
-                return df[cols].astype(str).apply("|".join, axis=1).str.strip().str.upper()
+                result = df[cols].astype(str).apply("|".join, axis=1).str.strip()
+                if not st.session_state.case_sensitive_keys:
+                    result = result.str.upper()
+                return result
             norm_a = _mk_comp_key(df_a, key_a_cols)
             norm_b = _mk_comp_key(df_b, key_b_cols)
             joined_count = len(set(norm_a) & set(norm_b))

@@ -1,10 +1,10 @@
 import streamlit as st
 
-@st.cache_data
+
 def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
     """
     Returns (global_css, theme_css) as strings.
-    Cached by theme name and zoom level.
+    Not cached so theme changes with source edits take effect immediately.
     """
     zoom = zoom_level / 100.0
 
@@ -19,8 +19,6 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
                           "#ffffff" if theme == "Standard Dark" else \
                           "#182B49"
 
-    sidebar_select_svg = sidebar_select_text
-
     global_css = f"""
         <style>
         section[data-testid="stSidebar"] [data-testid="stSelectbox"] 
@@ -31,34 +29,34 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
         }}
         section[data-testid="stSidebar"] [data-testid="stSelectbox"] 
             div[data-baseweb="select"] svg {{
-            fill: {sidebar_select_svg} !important;
+            fill: {sidebar_select_text} !important;
         }}
         </style>
     """
     
     # Define colors based on theme
     if theme == "UC Navy (Dark)":
-        bg = "#182B49"           # UCSD Navy
-        text = "#FFCD00"         # UCSD Gold
-        primary = "#FFCD00"      # Gold buttons
-        secondary_bg = "#003B5C" # Deeper Blue for cards
-        card_text = "#FFCD00"    # Gold for card text
+        bg = "#182B49"
+        text = "#FFCD00"
+        primary = "#FFCD00"
+        secondary_bg = "#003B5C"
+        card_text = "#FFCD00"
         border = "#FFCD00"
-        sidebar_bg = "#002135"   
+        sidebar_bg = "#002135"
         sidebar_text = "#FFFFFF"
         button_text = "#182B49"
         uploader_bg = "#003B5C"
     elif theme == "UC Gold (Light)":
-        bg = "#FFCD00"           # UCSD Gold
-        text = "#182B49"         # Dark Navy for contrast
-        primary = "#182B49"      # Navy buttons
-        secondary_bg = "#FFFFFF" # Light background for cards
-        card_text = "#182B49"    # Dark Navy for card text
+        bg = "#FFCD00"
+        text = "#182B49"
+        primary = "#182B49"
+        secondary_bg = "#FFFFFF"
+        card_text = "#182B49"
         border = "#182B49"
-        sidebar_bg = "#B38F00"   
-        sidebar_text = "#000000" # Black for sidebar
+        sidebar_bg = "#B38F00"
+        sidebar_text = "#000000"
         button_text = "#FFFFFF"
-        uploader_bg = "#F5F5F5"  
+        uploader_bg = "#F5F5F5"
     elif theme == "Standard Dark":
         bg = "#0E1117"
         text = "#FAFAFA"
@@ -70,25 +68,28 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
         sidebar_text = "#FAFAFA"
         button_text = "#FFFFFF"
         uploader_bg = "#262730"
-    else: # Standard Light
+    else:
         bg = "#FFFFFF"
-        text = "#182B49"         # Dark Navy for contrast
+        text = "#182B49"
         primary = "#FF4B4B"
-        secondary_bg = "#F0F2F6" # Light Gray for cards
-        card_text = "#182B49"    # Dark Navy for card text
+        secondary_bg = "#F0F2F6"
+        card_text = "#182B49"
         border = "#E6E6E6"
         sidebar_bg = "#F0F2F6"
-        sidebar_text = "#182B49" # Dark Navy for sidebar
+        sidebar_text = "#182B49"
         button_text = "#FFFFFF"
         uploader_bg = "#F0F2F6"
 
-    # Define theme-specific overrides for specific widgets
+    # Theme-aware widget overrides
     segmented_bg = primary
     segmented_text = button_text
     dropdown_bg = "#ffffff"
     dropdown_text = text
 
-    if theme == "UC Gold (Light)":
+    if theme == "UC Navy (Dark)":
+        dropdown_bg = "#182B49"
+        dropdown_text = "#FFCD00"
+    elif theme == "UC Gold (Light)":
         segmented_bg = "#182B49"
         segmented_text = "#FFCD00"
         dropdown_bg = "#ffffff"
@@ -102,27 +103,24 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
         dropdown_bg = "#ffffff"
         dropdown_text = "#1a1a1a"
 
-    # Build theme-specific CSS blocks
     theme_specific_css = ""
-    
+
     if theme == "Standard Dark":
-        theme_specific_css = """
+        theme_specific_css = """\
         /* STANDARD DARK THEME-SPECIFIC FIXES */
-        /* Main content selectbox */
-        [data-testid="stSelectbox"] {
+        [data-testid="stSegmentedControl"] {
+            background-color: transparent !important;
+        }
+        [data-testid="stSegmentedControl"] button,
+        [data-testid="stSegmentedControl"] > div > button {
             background: #2b2b2b !important;
             color: #ffffff !important;
         }
-        [data-testid="stSelectbox"] * {
+        [data-testid="stSegmentedControl"] button *,
+        [data-testid="stSegmentedControl"] > div > button * {
             background: #2b2b2b !important;
             color: #ffffff !important;
         }
-        /* Select dropdown styling */
-        [data-baseweb="select"] > div {
-            background: #2b2b2b !important;
-            color: #ffffff !important;
-        }
-        /* Listbox and option dropdowns */
         div[role="listbox"],
         div[role="option"],
         [data-baseweb="listbox"] {
@@ -136,35 +134,54 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
             color: #ffffff !important;
         }
         """
-    
     elif theme == "Standard Light":
-        theme_specific_css = """
+        theme_specific_css = """\
         /* STANDARD LIGHT THEME-SPECIFIC FIXES */
-        /* Segmented control full override */
+        [data-testid="stSegmentedControl"] {
+            background-color: transparent !important;
+        }
         [data-testid="stSegmentedControl"] button,
-        [data-testid="stSegmentedControl"] > div > button {
-            background: #1a1a1a !important;
-            color: #ffffff !important;
+        [data-testid="stSegmentedControl"] [role="button"],
+        [data-testid="stSegmentedControl"] [role="radio"],
+        [data-testid="stSegmentedControl"] [role="radio"],
+        [data-testid="stSegmentedControl"] > div > button,
+        [data-testid="stSegmentedControl"] > div > div[role="button"],
+        [data-testid="stSegmentedControl"] > div > [role="radio"] {
+            background: #e0e0e0 !important;
+            color: #182B49 !important;
+            border: 1px solid #182B49 !important;
+            outline: none !important;
+            box-shadow: none !important;
         }
-        [data-testid="stSegmentedControl"] button p,
-        [data-testid="stSegmentedControl"] button span,
-        [data-testid="stSegmentedControl"] button div,
         [data-testid="stSegmentedControl"] button *,
-        [data-testid="stSegmentedControl"] > div > button p,
-        [data-testid="stSegmentedControl"] > div > button span,
-        [data-testid="stSegmentedControl"] > div > button div,
-        [data-testid="stSegmentedControl"] > div > button * {
-            background: #1a1a1a !important;
+        [data-testid="stSegmentedControl"] [role="button"] * {
+            color: #182B49 !important;
+        }
+        [data-testid="stSegmentedControl"] button[aria-checked="true"],
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="true"] {
+            background: #182B49 !important;
             color: #ffffff !important;
         }
-        [data-testid="stSegmentedControl"] button[aria-pressed="true"],
-        [data-testid="stSegmentedControl"] > div > button[aria-pressed="true"],
-        [data-testid="stSegmentedControl"] button[aria-pressed="true"] *,
-        [data-testid="stSegmentedControl"] > div > button[aria-pressed="true"] * {
-            background: #1a1a1a !important;
+        [data-testid="stSegmentedControl"] button[aria-checked="true"] *,
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="true"] * {
             color: #ffffff !important;
         }
-        /* STANDARD LIGHT — Force uploader and dropzone to light */
+        /* Unselected: light grey bg, navy text */
+        [data-testid="stSegmentedControl"] button[aria-checked="false"],
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="false"] {
+            background: #e0e0e0 !important;
+            color: #182B49 !important;
+        }
+        [data-testid="stSegmentedControl"] button[aria-checked="false"] *,
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="false"] * {
+            color: #182B49 !important;
+        }
+        [data-testid="stSegmentedControl"] button:focus,
+        [data-testid="stSegmentedControl"] button:focus-visible,
+        [data-testid="stSegmentedControl"] button:active {
+            outline: none !important;
+            box-shadow: none !important;
+        }
         [data-testid="stFileUploader"],
         [data-testid="stFileUploaderDropzone"],
         [data-testid="stFileUploaderDropzone"] section,
@@ -176,20 +193,18 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
         [data-testid="stFileUploaderDropzone"] * {
             color: #182B49 !important;
         }
+        [data-testid="stFileUploaderDropzone"] {
+            border: 2px dashed #E6E6E6 !important;
+        }
         [data-baseweb="input"] input,
         [data-baseweb="textarea"] textarea {
             background-color: #FFFFFF !important;
             color: #182B49 !important;
         }
-        [data-testid="stFileUploaderDropzone"] {
-            border: 2px dashed #E6E6E6 !important;
-        }
         """
-    
     elif theme == "UC Navy (Dark)":
-        theme_specific_css = """
+        theme_specific_css = """\
         /* UC NAVY THEME-SPECIFIC FIXES */
-        /* UC NAVY — Sidebar selectbox hard override */
         section[data-testid="stSidebar"] [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
         section[data-testid="stSidebar"] [data-testid="stSelectbox"] div[data-baseweb="select"] > div * {
             background-color: #182B49 !important;
@@ -198,67 +213,154 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
         section[data-testid="stSidebar"] [data-testid="stSelectbox"] div[data-baseweb="select"] svg {
             fill: #FFCD00 !important;
         }
-        /* Segmented control buttons - flat style */
-        [data-testid="stSegmentedControl"] button,
-        [data-testid="stSegmentedControl"] > div > button {
-            background: #182B49 !important;
+        section[data-testid="stMain"] [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+            background-color: #182B49 !important;
             color: #FFCD00 !important;
             border: 1px solid #FFCD00 !important;
         }
-        /* All child p, span in segmented control */
-        [data-testid="stSegmentedControl"] button p,
-        [data-testid="stSegmentedControl"] button span,
-        [data-testid="stSegmentedControl"] > div > button p,
-        [data-testid="stSegmentedControl"] > div > button span {
+        section[data-testid="stMain"] [data-testid="stSelectbox"] div[data-baseweb="select"] > div * {
+            background-color: #182B49 !important;
             color: #FFCD00 !important;
         }
-        /* Active/selected segmented button state */
-        [data-testid="stSegmentedControl"] button[aria-pressed="true"],
-        [data-testid="stSegmentedControl"] > div > button[aria-pressed="true"] {
+        section[data-testid="stMain"] [data-testid="stSelectbox"] div[data-baseweb="select"] svg {
+            fill: #FFCD00 !important;
+        }
+        [data-testid="stSegmentedControl"] {
+            background-color: transparent !important;
+        }
+        [data-testid="stSegmentedControl"] button,
+        [data-testid="stSegmentedControl"] [role="button"],
+        [data-testid="stSegmentedControl"] [role="radio"],
+        [data-testid="stSegmentedControl"] [role="radio"],
+        [data-testid="stSegmentedControl"] > div > button,
+        [data-testid="stSegmentedControl"] > div > div[role="button"],
+        [data-testid="stSegmentedControl"] > div > [role="radio"] {
+            background: #182B49 !important;
+            color: #FFCD00 !important;
+            border: 1px solid #FFCD00 !important;
+            outline: none !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stSegmentedControl"] button *,
+        [data-testid="stSegmentedControl"] [role="button"] * {
+            color: #FFCD00 !important;
+        /* Unselected: navy bg, gold text */
+        [data-testid="stSegmentedControl"] button[aria-checked="false"],
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="false"] {
+            background: #182B49 !important;
+            color: #FFCD00 !important;
+        }
+        [data-testid="stSegmentedControl"] button[aria-checked="false"] *,
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="false"] * {
+            color: #FFCD00 !important;
+        }
+        }
+        [data-testid="stSegmentedControl"] button[aria-checked="true"],
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="true"] {
             background: #0d1b2e !important;
             color: #FFCD00 !important;
         }
+        [data-testid="stSegmentedControl"] button[aria-checked="true"] *,
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="true"] * {
+            color: #FFCD00 !important;
+        }
+        [data-testid="stSegmentedControl"] button:focus,
+        [data-testid="stSegmentedControl"] button:focus-visible,
+        [data-testid="stSegmentedControl"] button:active {
+            outline: none !important;
+            box-shadow: none !important;
+        }
         """
-    
     elif theme == "UC Gold (Light)":
-        theme_specific_css = """
+        theme_specific_css = """\
         /* UC GOLD THEME-SPECIFIC FIXES */
-        /* SQL Server input */
         [data-testid="stTextInput"] input {
             background: #ffffff !important;
             color: #182B49 !important;
         }
-        /* SQL Query textarea */
         [data-testid="stTextArea"] textarea {
             background: #ffffff !important;
             color: #182B49 !important;
         }
-        /* Database selectbox */
         [data-baseweb="select"] > div {
             background: #ffffff !important;
             color: #182B49 !important;
         }
-        /* UC GOLD — Sidebar label contrast and weight */
+        [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+        [data-testid="stSelectbox"] div[data-baseweb="select"] > div * {
+            background-color: #ffffff !important;
+            color: #182B49 !important;
+        }
+        [data-testid="stSelectbox"] div[data-baseweb="select"] svg {
+            fill: #182B49 !important;
+        }
         section[data-testid="stSidebar"] label,
         section[data-testid="stSidebar"] .stMarkdown p {
             color: #000000 !important;
             font-weight: 600 !important;
         }
-        /* Segmented control buttons */
+        [data-testid="stSegmentedControl"] {
+            background-color: transparent !important;
+        }
         [data-testid="stSegmentedControl"] button,
-        [data-testid="stSegmentedControl"] > div > button {
+        [data-testid="stSegmentedControl"] [role="button"],
+        [data-testid="stSegmentedControl"] [role="radio"],
+        [data-testid="stSegmentedControl"] [role="radio"],
+        [data-testid="stSegmentedControl"] > div > button,
+        [data-testid="stSegmentedControl"] > div > div[role="button"],
+        /* Unselected: gold bg, white text */
+        [data-testid="stSegmentedControl"] button[aria-checked="false"],
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="false"] {
+            background: #B38F00 !important;
+            color: #FFFFFF !important;
+        }
+        [data-testid="stSegmentedControl"] button[aria-checked="false"] *,
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="false"] * {
+            color: #FFFFFF !important;
+        }
+        [data-testid="stSegmentedControl"] > div > [role="radio"] {
+            background: #B38F00 !important;
+            color: #FFFFFF !important;
+            border: 1px solid #182B49 !important;
+            outline: none !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stSegmentedControl"] button *,
+        [data-testid="stSegmentedControl"] [role="button"] * {
+            color: #FFFFFF !important;
+        }
+        [data-testid="stSegmentedControl"] button[aria-checked="true"],
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="true"] {
             background: #182B49 !important;
             color: #FFCD00 !important;
-            border: 1px solid #182B49 !important;
         }
-        /* All child p, span in segmented control */
-        [data-testid="stSegmentedControl"] button p,
-        [data-testid="stSegmentedControl"] button span,
-        [data-testid="stSegmentedControl"] > div > button p,
-        [data-testid="stSegmentedControl"] > div > button span {
+        [data-testid="stSegmentedControl"] button[aria-checked="true"] *,
+        [data-testid="stSegmentedControl"] > div > button[aria-checked="true"] * {
             color: #FFCD00 !important;
         }
-        /* UC GOLD — Force uploader and dropzone to light background */
+        [data-testid="stSegmentedControl"] button:focus,
+        [data-testid="stSegmentedControl"] button:focus-visible,
+        [data-testid="stSegmentedControl"] button:active {
+            outline: none !important;
+            box-shadow: none !important;
+        }
+        .stButton>button,
+        .stButton>button:active,
+        .stButton>button:focus,
+        .stButton>button:hover {
+            background-color: #182B49 !important;
+            color: #FFFFFF !important;
+            border: 1px solid #182B49 !important;
+        }
+        .stButton>button p,
+        .stButton>button span,
+        .stButton>button div {
+            color: #FFFFFF !important;
+        }
+        [data-testid="stMetricValue"] > div,
+        [data-testid="stMetricLabel"] > div {
+            color: #182B49 !important;
+        }
         [data-testid="stFileUploader"],
         [data-testid="stFileUploaderDropzone"],
         [data-testid="stFileUploaderDropzone"] section,
@@ -275,25 +377,19 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
         }
         """
 
-    # Aggressive CSS injection to override Streamlit defaults and fix contrast
     theme_css = f"""
     <style>
-        /* Global Scale and Backgrounds */
         html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"], .main {{
             background-color: {bg} !important;
             color: {text} !important;
         }}
-        
         .block-container,
         .stMarkdown, label, p, span, caption {{
             font-size: {zoom}rem !important;
         }}
-
         .block-container {{
             background-color: {bg} !important;
         }}
-        
-        /* Sidebar Overrides */
         [data-testid="stSidebar"] {{
             background-color: {sidebar_bg} !important;
             border-right: 1px solid {border}44 !important;
@@ -301,9 +397,6 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
         [data-testid="stSidebar"] * {{
             color: {sidebar_text} !important;
         }}
-
-        /* FIX 3 — Sidebar selectbox carve-out */
-        /* Carve-out: sidebar selectbox must not inherit sidebar_text */
         section[data-testid="stSidebar"] 
             [data-testid="stSelectbox"] 
             div[data-baseweb="select"] > div {{
@@ -315,21 +408,15 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
             div[data-baseweb="select"] svg {{
             fill: {sidebar_select_text} !important;
         }}
-
-        /* Sidebar Button Symbols (Blue) */
         [data-testid="stSidebar"] .stButton>button {{
             color: #0000FF !important;
         }}
         [data-testid="stSidebar"] .stButton>button p {{
             color: #0000FF !important;
         }}
-        
-        /* Text and Markdown Global */
         h1, h2, h3, h4, h5, h6, p, span, label, .stMarkdown, [data-testid="stMarkdownContainer"] p {{
             color: {text} !important;
         }}
-        
-        /* Interactive Elements */
         .stButton>button, .stButton>button:hover, .stButton>button:active {{
             background-color: {primary} !important;
             color: {button_text} !important;
@@ -340,8 +427,6 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
         .stButton>button p {{
             color: {button_text} !important;
         }}
-        
-        /* ISSUE 1 — Segmented Control Buttons */
         [data-testid="stSegmentedControl"] {{
             background-color: transparent !important;
         }}
@@ -356,8 +441,6 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
             background-color: {segmented_bg} !important;
             color: {segmented_text} !important;
         }}
-
-        /* Dashboard Cards */
         .dashboard-card {{
             text-align: center !important;
             padding: 1.5rem !important;
@@ -368,7 +451,6 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
             box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
             margin-bottom: 1rem !important;
         }}
-        /* Target all text inside cards to ensure contrast */
         .dashboard-card *, .dashboard-card div, .dashboard-card p, .dashboard-card span {{
             color: {card_text} !important;
         }}
@@ -380,8 +462,6 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
             text-transform: uppercase !important;
             letter-spacing: 0.1em !important;
         }}
-        
-        /* Metric Styling */
         [data-testid="stMetric"] {{
             background-color: {secondary_bg} !important;
             padding: 1rem !important;
@@ -390,10 +470,6 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
         }}
         [data-testid="stMetricValue"] > div {{ color: {card_text} !important; }}
         [data-testid="stMetricLabel"] > div {{ color: {card_text} !important; font-weight: 600 !important; }}
-        
-        /* FIX 2 — Nuclear widget block (select removed) */
-        /* WIDGET & UPLOADER CONTRAST FIX (AGGRESSIVE) */
-        /* Target the container, the dropzone, and all internal sections */
         [data-testid="stFileUploader"],
         div[data-testid="stFileUploader"] > div,
         [data-testid="stFileUploaderDropzone"], 
@@ -407,16 +483,12 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
             color: {text} !important;
             border-color: {border}44 !important;
         }}
-
-        /* Force all text inside these widgets to the correct contrast color */
         [data-testid="stFileUploader"] *,
         [data-testid="stFileUploaderDropzone"] *,
         [data-baseweb="input"] *,
         [data-baseweb="textarea"] * {{
             color: {text} !important;
         }}
-
-        /* ISSUE 2 — Sidebar Select/Dropdown (Solid Box Fix) */
         [data-testid="stSelectbox"] > div,
         [data-testid="stSelectbox"] > div *, 
         [data-testid="stSelectbox"] div[role="combobox"],
@@ -424,31 +496,25 @@ def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
             background-color: {dropdown_bg} !important;
             color: {dropdown_text} !important;
         }}
-
-        /* Specific fix for file uploader border and labels */
         [data-testid="stFileUploaderDropzone"] {{
             border: 2px dashed {border} !important;
         }}
-        
-        /* Interactive Buttons Contrast Reinforcement */
         .stButton>button, .stButton>button p, .stButton>button span {{
             color: {button_text} !important;
             font-weight: 800 !important;
         }}
-        
-        /* Dataframes and Tables */
         .stDataFrame, [data-testid="stTable"], [data-testid="stDataFrame"] {{ 
             background-color: {secondary_bg} !important;
             border: 1px solid {border}44 !important;
         }}
-
         {theme_specific_css}
     </style>
     """
     return global_css, theme_css
 
+
 def apply_custom_theme():
-    """Inject optimized custom CSS based on theme and zoom level."""
+    """Inject custom CSS based on theme and zoom level."""
     theme = st.session_state.get("theme", "UC Navy (Dark)")
     zoom = st.session_state.get("zoom", 100)
     global_css, theme_css = build_theme_css(theme, zoom)
