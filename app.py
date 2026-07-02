@@ -178,6 +178,10 @@ def init_session_state():
         st.session_state.approach = None
     if "results" not in st.session_state:
         st.session_state.results = None
+    if "review_samples" not in st.session_state:
+        st.session_state.review_samples = {}
+    if "reviewed_indices" not in st.session_state:
+        st.session_state.reviewed_indices = set()
     if "ollama_active" not in st.session_state:
         st.session_state.ollama_active = False
     if "threshold" not in st.session_state:
@@ -1727,6 +1731,8 @@ def render_validation_approaches():
             cols_missing[0].metric("Missing in Source A", f"{missing_in_a:,}")
             cols_missing[1].metric("Missing in Source B", f"{missing_in_b:,}")
 
+            render_sampled_review(results["data"])
+            render_sampled_review(results["data"])
             render_cross_tabulation(df_a, df_b, results["data"], key_a_cols, key_b_cols)
 
             if results["data"].empty:
@@ -1944,6 +1950,8 @@ def render_validation_approaches():
             cols_missing[0].metric("Missing in Source A", f"{missing_in_a:,}")
             cols_missing[1].metric("Missing in Source B", f"{missing_in_b:,}")
 
+            render_sampled_review(results["data"])
+            render_sampled_review(results["data"])
             render_cross_tabulation(df_a, df_b, results["data"], key_a_cols, key_b_cols)
 
             if results["data"].empty:
@@ -1986,6 +1994,113 @@ def render_validation_approaches():
                     mime="text/plain",
                     key=f"download_audit_approach3_{results['ts']}"
                 )
+
+
+def render_sampled_review(results_df):
+    """Allow analysts to manually review a random sample of mismatches."""
+    if results_df is None or results_df.empty:
+        return
+
+    # Only column-level mismatches (not missing-key rows)
+    col_df = results_df[results_df['col_df1'] != '<ROW MISSING>'].copy()
+    if col_df.empty:
+        return
+
+    # Reset review state when results change (keyed by hash of results)
+    results_hash = hash((len(results_df), results_df['col_df1'].iloc[0] if len(results_df) > 0 else ''))
+    if st.session_state.get("_review_results_hash") != results_hash:
+        st.session_state.review_samples = {}
+        st.session_state.reviewed_indices = set()
+        st.session_state._review_results_hash = results_hash
+
+    with st.expander("Sampled Manual Review", expanded=False):
+        st.caption(
+            "Review a random sample of mismatches to verify they are genuine. "
+            "Mark each as confirmed or flag it for investigation."
+        )
+
+        # Sample size selector
+        total_avail = len(col_df)
+        sample_size = st.selectbox(
+            "Sample size",
+            options=[min(n, total_avail) for n in [5, 10, 20, 50] if n <= total_avail],
+            index=0,
+            key="review_sample_size",
+        )
+
+        col_review, col_status = st.columns([2, 1])
+
+        with col_review:
+            if st.button("Draw Sample", key="draw_sample", type="secondary"):
+                sampled = col_df.sample(n=sample_size, random_state=42)
+                st.session_state.review_samples = {
+                    i: row.to_dict() for i, (_, row) in enumerate(sampled.iterrows())
+                }
+                st.session_state.reviewed_indices = set()
+                st.rerun()
+
+        with col_status:
+            if st.session_state.review_samples:
+                total = len(st.session_state.review_samples)
+                done = len(st.session_state.reviewed_indices)
+                pct = int(done / total * 100) if total > 0 else 0
+                st.markdown(f"**Progress:** {done}/{total} ({pct}%)")
+
+        # Render sample records for review
+        if not st.session_state.review_samples:
+            st.info("Click **Draw Sample** to select random mismatches for review.")
+            return
+
+        st.divider()
+        for idx, record in st.session_state.review_samples.items():
+            already_reviewed = idx in st.session_state.reviewed_indices
+            border = "#00C851" if already_reviewed else "#FF880088"
+
+            kv = record.get("key_df1", "")
+            if pd.isna(kv) or kv == "<MISSING>":
+                kv = record.get("key_df2", "?")
+            col_name = record.get("col_df1", "?")
+            val_a = record.get("val_df1", "")
+            val_b = record.get("val_df2", "")
+            match_t = record.get("match_type", record.get("comparison_type", "?"))
+
+            st.markdown(
+                f"<div style='border:1px solid {border}; border-radius:6px; padding:0.6rem; "
+                f"margin-bottom:0.4rem;'>"
+                f"<span style='color:#aaa; font-size:0.8rem;'>Key: {kv} &nbsp;|&nbsp; Column: {col_name}</span><br>"
+                f"<span style='color:#FFCD00;'>Source A: {val_a}</span><br>"
+                f"<span style='color:#FF8800;'>Source B: {val_b}</span><br>"
+                f"<span style='color:#888; font-size:0.8rem;'>Type: {match_t}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+            c1, c2 = st.columns([1, 5])
+            with c1:
+                if already_reviewed:
+                    st.success("✅")
+                else:
+                    if st.button(f"✓ Confirm", key=f"confirm_{idx}"):
+                        st.session_state.reviewed_indices.add(idx)
+                        st.rerun()
+
+            with c2:
+                if not already_reviewed:
+                    if st.button(f"🔍 Flag for Investigation", key=f"flag_{idx}"):
+                        st.session_state.reviewed_indices.add(idx)
+                        st.rerun()
+
+        # Summary
+        if st.session_state.reviewed_indices:
+            total = len(st.session_state.review_samples)
+            done = len(st.session_state.reviewed_indices)
+            if done == total:
+                st.success(f"All {total} records reviewed.")
+            else:
+                st.info(f"{total - done} records remaining.")
+            if st.button("Reset Review", key="reset_review"):
+                st.session_state.reviewed_indices = set()
+                st.rerun()
 
 
 def render_cross_tabulation(df_a, df_b, results_df, key_a_cols, key_b_cols):
