@@ -687,11 +687,11 @@ def render_column_mapping():
         # Initialize col_pairs from suggestions
         if suggestions:
             st.session_state.col_pairs = [
-                {"id": str(uuid.uuid4()), "a": col_a, "b": col_b, "threshold": 100}
+                {"id": str(uuid.uuid4()), "a": col_a, "b": col_b, "threshold": 100, "weight": 1}
                 for col_a, col_b in suggestions.items()
             ]
         else:
-            st.session_state.col_pairs = [{"id": str(uuid.uuid4()), "a": "", "b": "", "threshold": 100}]
+            st.session_state.col_pairs = [{"id": str(uuid.uuid4()), "a": "", "b": "", "threshold": 100, "weight": 1}]
         
         # Store state for change detection
         st.session_state.last_suggestion_state = current_suggestion_state
@@ -768,7 +768,7 @@ def render_column_mapping():
     
     # Add pair button
     if st.button("Add Column Pair"):
-        st.session_state.col_pairs.append({"id": str(uuid.uuid4()), "a": "", "b": "", "threshold": 100})
+        st.session_state.col_pairs.append({"id": str(uuid.uuid4()), "a": "", "b": "", "threshold": 100, "weight": 1})
         st.rerun()
     
     # ========== COMPOSITE MAPPING BUILDER (APPROACH 3 ONLY) ==========
@@ -1161,6 +1161,42 @@ def calculate_match_score(results_df: pd.DataFrame, total_unique_keys: int) -> f
     mismatched_count = mismatched_keys.nunique()
     
     score = (1 - mismatched_count / total_unique_keys) * 100
+    return round(max(0.0, score), 1)
+
+
+def calculate_weighted_score(results_df: pd.DataFrame, total_unique_keys: int, weight_map: dict) -> float:
+    """Calculate a weighted match score where some columns contribute more."""
+    if results_df.empty:
+        return 100.0
+    if total_unique_keys <= 0:
+        return 0.0
+
+    m_df = results_df.copy()
+    m_df.replace('<MISSING>', np.nan, inplace=True)
+
+    # Column-level mismatches only (exclude missing-key rows)
+    col_df = m_df[m_df['col_df1'] != '<ROW MISSING>']
+    if col_df.empty:
+        return 100.0
+
+    # Count unique mismatched keys per column
+    per_col = col_df.groupby('col_df1')['key_df1'].nunique()
+
+    if per_col.empty:
+        return 100.0
+
+    # Weighted penalty: each column's mismatch count × its weight
+    total_weighted = sum(
+        count * weight_map.get(col, 1)
+        for col, count in per_col.items()
+    )
+    total_checked = sum(weight_map.get(col, 1) for col in per_col.index)
+
+    # Rough weighted mismatched key count: scale total_weighted back to
+    # "effective unique keys with weighted mismatches"
+    effective_mismatches = total_weighted / max(1, total_checked / len(per_col))
+
+    score = (1 - effective_mismatches / total_unique_keys) * 100
     return round(max(0.0, score), 1)
 
 
@@ -1572,6 +1608,7 @@ def render_validation_approaches():
                         "data": results_df,
                         "coercion_log": coercion_log,
                         "col_map": col_map,
+                        "weight_map": weight_map,
                         "ts": ts
                     }
                     # Audit trail
@@ -1627,6 +1664,7 @@ def render_validation_approaches():
             joined_count = len(set(norm_a) & set(norm_b))
             
             score = calculate_match_score(results["data"], total_keys)
+            weighted_score = calculate_weighted_score(results["data"], total_keys, results.get("weight_map", {})) if results.get("weight_map") else None
             
             # RESULTS-01 & 04: Summary Coverage Metrics
             missing_in_a = results["data"][results["data"]['match_type'] == 'Missing in Source A']['key_df2'].nunique()
@@ -1833,6 +1871,7 @@ def render_validation_approaches():
             st.subheader("Results")
             
             score = calculate_match_score(results["data"], total_keys)
+            weighted_score = calculate_weighted_score(results["data"], total_keys, results.get("weight_map", {})) if results.get("weight_map") else None
             
             # Intersection for Approach 3
             def _mk_comp_key(df, cols):
