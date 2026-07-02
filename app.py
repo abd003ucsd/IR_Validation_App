@@ -37,6 +37,7 @@ from matching_engine import (
 from ui_theme import apply_custom_theme
 
 # Import validation functions from local module
+from audit_log import init_db, save_run, get_recent_runs
 from validation_utils import (
     validate_data,
     compare_records,
@@ -123,6 +124,7 @@ UCOP_GAD_PRESET = {
 
 def init_session_state():
     """Initialize all required session state variables."""
+    init_db()
     # UI State
     if "theme" not in st.session_state:
         # FIX 1: Wrong default theme
@@ -168,6 +170,10 @@ def init_session_state():
         st.session_state.composite_map = []
     if "key_col_pairs" not in st.session_state:
         st.session_state.key_col_pairs = []
+    if "type_overrides_a" not in st.session_state:
+        st.session_state.type_overrides_a = {}
+    if "type_overrides_b" not in st.session_state:
+        st.session_state.type_overrides_b = {}
     if "approach" not in st.session_state:
         st.session_state.approach = None
     if "results" not in st.session_state:
@@ -176,6 +182,8 @@ def init_session_state():
         st.session_state.ollama_active = False
     if "threshold" not in st.session_state:
         st.session_state.threshold = 60
+    if "case_sensitive_keys" not in st.session_state:
+        st.session_state.case_sensitive_keys = False
 
 
 # ============================================================
@@ -258,6 +266,17 @@ def render_sidebar():
                 value=st.session_state.threshold if isinstance(st.session_state.threshold, float) else 0.75,
                 step=0.05
             )
+        
+        # Key normalization toggle
+        st.divider()
+        st.subheader("Key Matching")
+        st.toggle(
+            "Case Sensitive Keys",
+            value=st.session_state.case_sensitive_keys,
+            key="case_sensitive_keys",
+            help="When enabled, key values are matched exactly including case. "
+                 "When disabled (default), keys are normalized to uppercase for matching."
+        )
         
         st.divider()
         
@@ -501,6 +520,63 @@ def render_source_uploaders():
                     st.dataframe(st.session_state.df_b.head(5), width="stretch")
 
 
+def render_column_presence_report():
+    """Show column presence comparison when both sources are loaded."""
+    df_a = st.session_state.get("df_a")
+    df_b = st.session_state.get("df_b")
+    if df_a is None or df_b is None:
+        return
+
+    cols_a = set(df_a.columns)
+    cols_b = set(df_b.columns)
+
+    only_a = sorted(cols_a - cols_b)
+    only_b = sorted(cols_b - cols_a)
+    both = sorted(cols_a & cols_b)
+
+    if not only_a and not only_b:
+        return  # identical columns — no need to show
+
+    st.divider()
+    st.subheader("Column Presence")
+
+    col_status = st.columns(3)
+    with col_status[0]:
+        if only_a:
+            st.markdown(
+                f"<div style='color:#FF8800; font-weight:600;'>Only in Source A ({len(only_a)})</div>",
+                unsafe_allow_html=True
+            )
+            for c in only_a:
+                st.caption(f"  {c}")
+        else:
+            st.caption("✅ All Source A columns present in Source B")
+
+    with col_status[1]:
+        if both:
+            st.markdown(
+                f"<div style='color:#00C851; font-weight:600;'>In Both ({len(both)})</div>",
+                unsafe_allow_html=True
+            )
+            st.caption(" ✓ ".join(both[:12]))
+            if len(both) > 12:
+                st.caption(f"... and {len(both) - 12} more")
+        else:
+            st.caption("No common columns — check your sources")
+
+    with col_status[2]:
+        if only_b:
+            st.markdown(
+                f"<div style='color:#FF8800; font-weight:600;'>Only in Source B ({len(only_b)})</div>",
+                unsafe_allow_html=True
+            )
+            for c in only_b:
+                st.caption(f"  {c}")
+        else:
+            st.caption("✅ All Source B columns present in Source A")
+
+
+
 # ============================================================
 # SECTION 6: COLUMN MAPPING
 # ============================================================
@@ -518,6 +594,21 @@ def render_column_mapping():
 
     cols_a = [""] + list(st.session_state.df_a.columns)
     cols_b = [""] + list(st.session_state.df_b.columns)
+
+    # Auto-initialize one key pair if none exist when data loads
+    if not st.session_state.key_col_pairs:
+        # Try to find a common column name to pre-select as default key
+        common_cols = [c for c in st.session_state.df_a.columns
+                       if c in st.session_state.df_b.columns and c.strip()]
+        if common_cols:
+            # Use first common column
+            st.session_state.key_col_pairs.append(
+                {"id": str(uuid.uuid4()), "a": common_cols[0], "b": common_cols[0]}
+            )
+        else:
+            st.session_state.key_col_pairs.append(
+                {"id": str(uuid.uuid4()), "a": "", "b": ""}
+            )
 
     st.subheader("🔑 Key Columns")
     st.caption(
@@ -596,11 +687,11 @@ def render_column_mapping():
         # Initialize col_pairs from suggestions
         if suggestions:
             st.session_state.col_pairs = [
-                {"id": str(uuid.uuid4()), "a": col_a, "b": col_b}
+                {"id": str(uuid.uuid4()), "a": col_a, "b": col_b, "threshold": 100}
                 for col_a, col_b in suggestions.items()
             ]
         else:
-            st.session_state.col_pairs = [{"id": str(uuid.uuid4()), "a": "", "b": ""}]
+            st.session_state.col_pairs = [{"id": str(uuid.uuid4()), "a": "", "b": "", "threshold": 100}]
         
         # Store state for change detection
         st.session_state.last_suggestion_state = current_suggestion_state
@@ -677,7 +768,7 @@ def render_column_mapping():
     
     # Add pair button
     if st.button("Add Column Pair"):
-        st.session_state.col_pairs.append({"id": str(uuid.uuid4()), "a": "", "b": ""})
+        st.session_state.col_pairs.append({"id": str(uuid.uuid4()), "a": "", "b": "", "threshold": 100})
         st.rerun()
     
     # ========== COMPOSITE MAPPING BUILDER (APPROACH 3 ONLY) ==========
@@ -734,7 +825,234 @@ def render_column_mapping():
         st.session_state.composite_map.append({"id": str(uuid.uuid4()), "a": "", "bs": []})
         st.rerun()
 
+    # ========== MAPPING EXPORT / IMPORT ==========
+    st.divider()
+    st.subheader("Mapping Presets")
+    st.caption("Save or load your column mapping configuration for recurring validations.")
 
+    col_exp, col_imp = st.columns([1, 1])
+
+    with col_exp:
+        if st.button("💾 Save Mapping as JSON", key="export_mapping"):
+            mapping = {
+                "version": "1",
+                "key_col_pairs": [
+                    {"a": p["a"], "b": p["b"]}
+                    for p in st.session_state.key_col_pairs if p.get("a") and p.get("b")
+                ],
+                "col_pairs": [
+                    {"a": p["a"], "b": p["b"]}
+                    for p in st.session_state.col_pairs if p.get("a") and p.get("b")
+                ],
+                "composite_map": [
+                    {"a": p["a"], "bs": p["bs"]}
+                    for p in st.session_state.composite_map if p.get("a") and p.get("bs")
+                ]
+            }
+            mapping_json = json.dumps(mapping, indent=2)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            st.download_button(
+                label="Download Mapping File",
+                data=mapping_json,
+                file_name=f"ir_mapping_{ts}.json",
+                mime="application/json",
+                key="download_mapping",
+                type="primary"
+            )
+
+    with col_imp:
+        uploaded_mapping = st.file_uploader(
+            "Load Mapping JSON",
+            type=["json"],
+            key="upload_mapping",
+            label_visibility="collapsed"
+        )
+        if uploaded_mapping is not None:
+            try:
+                loaded = json.load(uploaded_mapping)
+                loaded_version = loaded.get("version", "0")
+
+                if loaded.get("key_col_pairs"):
+                    st.session_state.key_col_pairs = [
+                        {"id": str(uuid.uuid4()), "a": p["a"], "b": p["b"]}
+                        for p in loaded["key_col_pairs"]
+                    ]
+                if loaded.get("col_pairs"):
+                    st.session_state.col_pairs = [
+                        {"id": str(uuid.uuid4()), "a": p["a"], "b": p["b"]}
+                        for p in loaded["col_pairs"]
+                    ]
+                if loaded.get("composite_map"):
+                    st.session_state.composite_map = [
+                        {"id": str(uuid.uuid4()), "a": p["a"], "bs": p["bs"]}
+                        for p in loaded["composite_map"]
+                    ]
+
+                st.success(f"Mapping loaded: {len(st.session_state.key_col_pairs)} key pairs, "
+                           f"{len(st.session_state.col_pairs)} column pairs, "
+                           f"{len(st.session_state.composite_map)} composite pairs.")
+                st.session_state.results = None
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to load mapping: {str(e)}")
+
+    # Render column profiles below the mapping
+    render_column_profiles()
+
+
+
+# ============================================================
+# SECTION 6B: COLUMN PROFILES & TYPE COERCION
+# ============================================================
+
+def detect_mixed_types(series: pd.Series) -> bool:
+    """Return True if a series has a mix of numeric and non-numeric values."""
+    if pd.api.types.is_numeric_dtype(series.dtype):
+        return False
+    # Sample up to 10K to avoid OOM on huge datasets
+    sample = series.dropna().head(10000)
+    if len(sample) == 0:
+        return False
+    # Try numeric coercion — if some values parse and some don't, it's mixed
+    coerced = pd.to_numeric(sample, errors='coerce')
+    parsed = coerced.notna().sum()
+    unparsed = sample.notna().sum() - parsed
+    return parsed > 0 and unparsed > 0
+
+
+def profile_columns(df: pd.DataFrame, source_label: str):
+    """Display an interactive column profile with type warnings and coercion overrides."""
+    if df is None or df.empty:
+        return
+
+    override_key = "type_overrides_a" if "A" in source_label or "a" in source_label else "type_overrides_b"
+    overrides = st.session_state.get(override_key, {})
+
+    st.caption(f"**{source_label}** — {df.shape[1]} columns, {df.shape[0]:,} rows")
+
+    profile_data = []
+    for col in df.columns:
+        series = df[col]
+        null_pct = series.isna().mean() * 100
+        dtype_name = series.dtype.name
+        is_mixed = detect_mixed_types(series)
+
+        # Sample display
+        sample_vals = series.dropna().unique()[:3]
+        sample_str = ", ".join(str(v) for v in sample_vals) if len(sample_vals) > 0 else "(all null)"
+
+        profile_data.append({
+            "column": col,
+            "type": dtype_name,
+            "nulls": f"{null_pct:.1f}%",
+            "mixed": "⚠ Mixed" if is_mixed else "",
+            "_null_pct": null_pct,
+            "_is_mixed": is_mixed,
+        })
+
+    # Build the UI as an interactive table
+    for i, row in enumerate(profile_data):
+        col1, col2, col3, col4, col5, col6 = st.columns([3.5, 1.5, 1, 1.2, 2, 0.3])
+
+        with col1:
+            st.text(row["column"])
+
+        with col2:
+            if row["_is_mixed"]:
+                st.markdown(f"<span style='color:#FF8800'>{row['type']}</span>", unsafe_allow_html=True)
+            else:
+                st.text(row["type"])
+
+        with col3:
+            st.text(row["nulls"])
+
+        with col4:
+            if row["_is_mixed"]:
+                st.markdown(f"<span style='color:#FF8800'>{row['mixed']}</span>", unsafe_allow_html=True)
+
+        with col5:
+            col_name = row["column"]
+            current_override = overrides.get(col_name, "Auto")
+            type_opts = ["Auto", "Numeric", "String", "Integer", "Datetime"]
+            idx_opts = type_opts.index(current_override) if current_override in type_opts else 0
+            selected = st.selectbox(
+                "Force type",
+                options=type_opts,
+                index=idx_opts,
+                key=f"force_{override_key}_{col_name}",
+                label_visibility="collapsed"
+            )
+            if selected != current_override:
+                overrides[col_name] = selected
+                st.session_state[override_key] = overrides
+
+    # Summary stats
+    total_cols = len(profile_data)
+    mixed_cols = sum(1 for r in profile_data if r["_is_mixed"])
+    high_null_cols = sum(1 for r in profile_data if r["_null_pct"] > 50)
+
+    parts = []
+    if mixed_cols:
+        parts.append(f"{mixed_cols} mixed-type ⚠")
+    if high_null_cols:
+        parts.append(f"{high_null_cols} high-null")
+    if parts:
+        st.caption("Issues: " + ", ".join(parts))
+    else:
+        st.caption("No type issues detected — all columns clean.")
+
+
+def apply_type_overrides(df: pd.DataFrame, overrides: dict) -> pd.DataFrame:
+    """Apply user-selected type overrides to a DataFrame copy."""
+    if not overrides:
+        return df
+    df = df.copy()
+    for col, target_type in overrides.items():
+        if col not in df.columns or target_type == "Auto":
+            continue
+        try:
+            if target_type == "Numeric":
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            elif target_type == "String":
+                df[col] = df[col].astype(str)
+            elif target_type == "Integer":
+                # Float → nullable Int64 to handle NaNs
+                numeric = pd.to_numeric(df[col], errors='coerce')
+                df[col] = numeric.astype('Int64')
+            elif target_type == "Datetime":
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+        except Exception:
+            # Silently skip failed coercions — user can fix and re-run
+            pass
+    return df
+
+
+def render_column_profiles():
+    """Render column profiles for both sources when data is loaded."""
+    df_a = st.session_state.get("df_a")
+    df_b = st.session_state.get("df_b")
+
+    if df_a is None and df_b is None:
+        return
+
+    with st.expander("📊 Column Profiles & Type Coercion", expanded=False):
+        st.caption(
+            "Inspect column types and null rates. Use the dropdown to force a type "
+            "if a column has mixed values (flagged with ⚠)."
+        )
+        tab_a, tab_b = st.tabs(["Source A", "Source B"])
+
+        with tab_a:
+            if df_a is not None:
+                profile_columns(df_a, "Source A")
+            else:
+                st.caption("No data loaded.")
+
+        with tab_b:
+            if df_b is not None:
+                profile_columns(df_b, "Source B")
+            else:
+                st.caption("No data loaded.")
 # ============================================================
 # SECTION 7: APPROACH SELECTOR
 # ============================================================
@@ -1036,6 +1354,12 @@ def render_validation_approaches():
 
     if not key_b_cols:
         st.info("Please select at least one source B key column to continue")
+
+    # Apply user-selected type overrides before validation
+    if st.session_state.get("type_overrides_a"):
+        df_a = apply_type_overrides(df_a, st.session_state.type_overrides_a)
+    if st.session_state.get("type_overrides_b"):
+        df_b = apply_type_overrides(df_b, st.session_state.type_overrides_b)
         return
     
     if approach is None:
@@ -1051,7 +1375,7 @@ def render_validation_approaches():
         )
     
     # Normalize keys for the union count to ensure identity consistency with merge logic (Rule 6)
-    total_keys = calculate_union_count(df_a, df_b, key_a_cols, key_b_cols)
+    total_keys = calculate_union_count(df_a, df_b, key_a_cols, key_b_cols, st.session_state.case_sensitive_keys)
 
     # Check for approach-specific requirements
     complete_pairs = [
@@ -1152,6 +1476,18 @@ def render_validation_approaches():
                         "rel_diff": rel_diff,
                         "coercion_log": coercion_log
                     }
+                    # Audit trail
+                    save_run(
+                        approach=approach,
+                        score=100.0,
+                        total_keys=0,
+                        joined_count=0,
+                        source_a_name=getattr(st.session_state.get("uploader_a"), "name", None),
+                        source_b_name=getattr(st.session_state.get("uploader_b"), "name", None),
+                        key_cols_a=key_a_cols,
+                        key_cols_b=key_b_cols,
+                        column_pairs=complete_pairs,
+                    )
                     if numeric_conversion_applied:
                         st.caption(
                             "Some columns were automatically converted to numeric for comparison."
@@ -1238,6 +1574,25 @@ def render_validation_approaches():
                         "col_map": col_map,
                         "ts": ts
                     }
+                    # Audit trail
+                    missing_in_a_ct = int(results_df[results_df['match_type'] == 'Missing in Source A']['key_df2'].nunique()) if not results_df.empty else 0
+                    missing_in_b_ct = int(results_df[results_df['match_type'] == 'Missing in Source B']['key_df1'].nunique()) if not results_df.empty else 0
+                    mismatch_ct = int(results_df[results_df['col_df1'] != '<ROW MISSING>']['key_df1'].nunique()) if not results_df.empty else 0
+                    score = calculate_match_score(results_df, total_keys)
+                    save_run(
+                        approach=approach,
+                        score=score,
+                        total_keys=total_keys,
+                        joined_count=joined_count,
+                        missing_in_a=missing_in_a_ct,
+                        missing_in_b=missing_in_b_ct,
+                        mismatch_count=mismatch_ct,
+                        source_a_name=getattr(st.session_state.get("uploader_a"), "name", None),
+                        source_b_name=getattr(st.session_state.get("uploader_b"), "name", None),
+                        key_cols_a=key_a_cols,
+                        key_cols_b=key_b_cols,
+                        column_pairs=complete_pairs,
+                    )
                 except Exception as e:
                     st.error(f" Comparison failed: {str(e)}")
                     return
@@ -1263,7 +1618,10 @@ def render_validation_approaches():
             # Count records present in both (Intersection)
             # Normalize locally to ensure joined_count is accurate to the matching Rule 6
             def _mk_comp_key(df, cols):
-                return df[cols].astype(str).apply("|".join, axis=1).str.strip().str.upper()
+                result = df[cols].astype(str).apply("|".join, axis=1).str.strip()
+                if not st.session_state.case_sensitive_keys:
+                    result = result.str.upper()
+                return result
             norm_a = _mk_comp_key(df_a, key_a_cols)
             norm_b = _mk_comp_key(df_b, key_b_cols)
             joined_count = len(set(norm_a) & set(norm_b))
@@ -1330,6 +1688,8 @@ def render_validation_approaches():
             cols_missing = st.columns(2)
             cols_missing[0].metric("Missing in Source A", f"{missing_in_a:,}")
             cols_missing[1].metric("Missing in Source B", f"{missing_in_b:,}")
+
+            render_cross_tabulation(df_a, df_b, results["data"], key_a_cols, key_b_cols)
 
             if results["data"].empty:
                 st.success("No differences found!")
@@ -1427,7 +1787,8 @@ def render_validation_approaches():
                         key_map=(key_a_cols, key_b_cols),
                         column_map=comp_map,
                         output_path=None,
-                        ask_before_write=False
+                        ask_before_write=False,
+                        case_sensitive=st.session_state.case_sensitive_keys
                     )
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     
@@ -1438,6 +1799,25 @@ def render_validation_approaches():
                         "comp_map": comp_map,
                         "ts": ts
                     }
+                    # Audit trail
+                    missing_in_a_ct = int(results_df[(results_df['comparison_type'] == 'missing_key') & (results_df['key_df1'] == '<MISSING>')]['key_df2'].nunique()) if not results_df.empty else 0
+                    missing_in_b_ct = int(results_df[(results_df['comparison_type'] == 'missing_key') & (results_df['key_df2'] == '<MISSING>')]['key_df1'].nunique()) if not results_df.empty else 0
+                    mismatch_ct = int(results_df[results_df['col_df1'] != '<ROW MISSING>']['key_df1'].nunique()) if not results_df.empty else 0
+                    score = calculate_match_score(results_df, total_keys)
+                    save_run(
+                        approach=approach,
+                        score=score,
+                        total_keys=total_keys,
+                        joined_count=joined_count,
+                        missing_in_a=missing_in_a_ct,
+                        missing_in_b=missing_in_b_ct,
+                        mismatch_count=mismatch_ct,
+                        source_a_name=getattr(st.session_state.get("uploader_a"), "name", None),
+                        source_b_name=getattr(st.session_state.get("uploader_b"), "name", None),
+                        key_cols_a=key_a_cols,
+                        key_cols_b=key_b_cols,
+                        composite_pairs=composite_pairs,
+                    )
                 except Exception as e:
                     st.error(f" Comparison failed: {str(e)}")
                     return
@@ -1456,7 +1836,10 @@ def render_validation_approaches():
             
             # Intersection for Approach 3
             def _mk_comp_key(df, cols):
-                return df[cols].astype(str).apply("|".join, axis=1).str.strip().str.upper()
+                result = df[cols].astype(str).apply("|".join, axis=1).str.strip()
+                if not st.session_state.case_sensitive_keys:
+                    result = result.str.upper()
+                return result
             norm_a = _mk_comp_key(df_a, key_a_cols)
             norm_b = _mk_comp_key(df_b, key_b_cols)
             joined_count = len(set(norm_a) & set(norm_b))
@@ -1522,6 +1905,8 @@ def render_validation_approaches():
             cols_missing[0].metric("Missing in Source A", f"{missing_in_a:,}")
             cols_missing[1].metric("Missing in Source B", f"{missing_in_b:,}")
 
+            render_cross_tabulation(df_a, df_b, results["data"], key_a_cols, key_b_cols)
+
             if results["data"].empty:
                 st.success("No differences found!")
             else:
@@ -1564,6 +1949,117 @@ def render_validation_approaches():
                 )
 
 
+def render_cross_tabulation(df_a, df_b, results_df, key_a_cols, key_b_cols):
+    """Show cross-tabulation of mismatches grouped by a categorical column."""
+    if results_df is None or results_df.empty:
+        return
+    if df_a is None or df_b is None:
+        return
+
+    # Build synthetic key columns for joining back to original data
+    def _mk_key(df, cols):
+        return df[cols].astype(str).apply("|".join, axis=1).str.strip().str.upper()
+
+    df_a = df_a.copy()
+    df_b = df_b.copy()
+    df_a["_xkey"] = _mk_key(df_a, key_a_cols)
+    df_b["_xkey"] = _mk_key(df_b, key_b_cols)
+
+    # Candidate categorical columns (exclude key cols and high-cardinality columns)
+    a_candidates = [c for c in df_a.columns
+                    if c not in key_a_cols and df_a[c].nunique() < df_a[c].count() * 0.5
+                    and df_a[c].nunique() <= 50 and c != "_xkey"]
+    b_candidates = [c for c in df_b.columns
+                    if c not in key_b_cols and df_b[c].nunique() < df_b[c].count() * 0.5
+                    and df_b[c].nunique() <= 50 and c != "_xkey"]
+
+    if not a_candidates and not b_candidates:
+        return
+
+    with st.expander("Cross-Tabulation", expanded=False):
+        st.caption("Group mismatches by a categorical column to identify problem areas.")
+
+        col_pick_a, col_pick_b = st.columns(2)
+
+        with col_pick_a:
+            group_col_a = st.selectbox(
+                "Group Source A mismatches by",
+                [""] + a_candidates,
+                key="x_tab_a",
+            )
+
+        with col_pick_b:
+            group_col_b = st.selectbox(
+                "Group Source B mismatches by",
+                [""] + b_candidates,
+                key="x_tab_b",
+            )
+
+        if group_col_a or group_col_b:
+            st.divider()
+
+        if group_col_a:
+            a_mismatch_keys = results_df[
+                (results_df["key_df1"] != "<MISSING>")
+            ]["key_df1"].unique()
+            a_merged = df_a[df_a["_xkey"].isin(a_mismatch_keys)][["_xkey", group_col_a]].drop_duplicates()
+            a_tab = a_merged[group_col_a].value_counts().reset_index()
+            a_tab.columns = [group_col_a, "Mismatches"]
+            a_tab["% of Total"] = (a_tab["Mismatches"] / a_tab["Mismatches"].sum() * 100).round(1)
+            st.markdown(f"**Source A — by {group_col_a}**")
+            st.dataframe(a_tab, width="stretch")
+
+        if group_col_b:
+            b_mismatch_keys = results_df[
+                (results_df["key_df2"] != "<MISSING>")
+            ]["key_df2"].unique()
+            b_merged = df_b[df_b["_xkey"].isin(b_mismatch_keys)][["_xkey", group_col_b]].drop_duplicates()
+            b_tab = b_merged[group_col_b].value_counts().reset_index()
+            b_tab.columns = [group_col_b, "Mismatches"]
+            b_tab["% of Total"] = (b_tab["Mismatches"] / b_tab["Mismatches"].sum() * 100).round(1)
+            st.markdown(f"**Source B — by {group_col_b}**")
+            st.dataframe(b_tab, width="stretch")
+
+
+def render_audit_history():
+    """Show audit trail history in a collapsed expander."""
+    try:
+        runs = get_recent_runs(20)
+    except Exception:
+        return  # DB not available
+
+    if not runs:
+        return
+
+    with st.expander("Run History & Audit Trail", expanded=False):
+        st.caption(f"Last {len(runs)} validation runs")
+
+        for run in runs[:5]:  # Show 5 most recent
+            ts = run.get("timestamp", "")[:19].replace("T", " ")
+            approach = run.get("approach", "?")
+            score = run.get("score", 0)
+            a_name = run.get("source_a_name") or "?"
+            b_name = run.get("source_b_name") or "?"
+            total = run.get("total_keys", 0)
+            misses = run.get("mismatch_count", 0)
+
+            box_color = "#00C851" if score >= 95 else "#FF8800" if score >= 80 else "#FF4444"
+            st.markdown(
+                f"<div style='display:flex; align-items:center; gap:1rem; "
+                f"padding:0.5rem; border-bottom:1px solid #444;'>"
+                f"<span style='color:{box_color}; font-weight:700; font-size:1.2rem;'>{score:.0f}%</span>"
+                f"<span style='color:#ccc; font-size:0.85rem;'>{ts}</span>"
+                f"<span style='color:#aaa;'>{approach}</span>"
+                f"<span style='color:#888; font-size:0.8rem;'>{a_name} vs {b_name}</span>"
+                f"<span style='color:#888;'>{total:,} keys, {misses:,} mismatches</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        if len(runs) > 5:
+            st.caption(f"... and {len(runs) - 5} older runs")
+
+
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
@@ -1585,9 +2081,11 @@ def main():
     # Render main content
     render_main_header()
     render_source_uploaders()
+    render_column_presence_report()
     render_column_mapping()
     render_approach_selector()
     render_validation_approaches()
+    render_audit_history()
 
     # Apply theme and zoom after all UI elements are rendered
     apply_custom_theme()

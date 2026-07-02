@@ -150,7 +150,7 @@ def check_ollama() -> bool:
 
 
 @st.cache_data
-def calculate_union_count(df_a: pd.DataFrame, df_b: pd.DataFrame, key_a, key_b) -> int:
+def calculate_union_count(df_a: pd.DataFrame, df_b: pd.DataFrame, key_a, key_b, case_sensitive: bool = False) -> int:
     """Return the number of unique keys across both dataframes.
 
     Supports both single-key (str) and composite-key (list of str) arguments.
@@ -158,9 +158,12 @@ def calculate_union_count(df_a: pd.DataFrame, df_b: pd.DataFrame, key_a, key_b) 
     keys_a = [key_a] if isinstance(key_a, str) else list(key_a)
     keys_b = [key_b] if isinstance(key_b, str) else list(key_b)
 
-    def _mk_key(df, cols):
-        return df[cols].astype(str).apply("|".join, axis=1).str.strip().str.upper()
+    def _mk_key(df, cols, cs):
+        result = df[cols].astype(str).apply("|".join, axis=1).str.strip()
+        if not cs:
+            result = result.str.upper()
+        return result
 
-    normalized_keys_a = _mk_key(df_a, keys_a)
-    normalized_keys_b = _mk_key(df_b, keys_b)
+    normalized_keys_a = _mk_key(df_a, keys_a, case_sensitive)
+    normalized_keys_b = _mk_key(df_b, keys_b, case_sensitive)
     return int(pd.concat([normalized_keys_a, normalized_keys_b]).nunique())
