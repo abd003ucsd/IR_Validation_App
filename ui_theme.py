@@ -1,6 +1,50 @@
 import streamlit as st
 
 
+_THEME_CONFIG = {
+    "UC Navy (Dark)": {
+        "bg": "#182B49", "text": "#FFCD00", "primary": "#FFCD00",
+        "secondary_bg": "#003B5C", "card_text": "#FFCD00",
+        "border": "#FFCD00", "sidebar_bg": "#002135",
+        "sidebar_text": "#FFFFFF", "button_text": "#182B49",
+        "uploader_bg": "#003B5C",
+        "sidebar_select_bg": "#182B49", "sidebar_select_text": "#FFCD00",
+        "segmented_bg": "#182B49", "segmented_text": "#FFCD00",
+        "dropdown_bg": "#182B49", "dropdown_text": "#FFCD00",
+    },
+    "UC Gold (Light)": {
+        "bg": "#FFCD00", "text": "#182B49", "primary": "#182B49",
+        "secondary_bg": "#FFFFFF", "card_text": "#182B49",
+        "border": "#182B49", "sidebar_bg": "#B38F00",
+        "sidebar_text": "#000000", "button_text": "#FFFFFF",
+        "uploader_bg": "#F5F5F5",
+        "sidebar_select_bg": "#B38F00", "sidebar_select_text": "#182B49",
+        "segmented_bg": "#182B49", "segmented_text": "#FFCD00",
+        "dropdown_bg": "#ffffff", "dropdown_text": "#182B49",
+    },
+    "Standard Dark": {
+        "bg": "#0E1117", "text": "#FAFAFA", "primary": "#1E88E5",
+        "secondary_bg": "#262730", "card_text": "#FAFAFA",
+        "border": "#444444", "sidebar_bg": "#111111",
+        "sidebar_text": "#FAFAFA", "button_text": "#FFFFFF",
+        "uploader_bg": "#262730",
+        "sidebar_select_bg": "#1e1e1e", "sidebar_select_text": "#ffffff",
+        "segmented_bg": "#1E88E5", "segmented_text": "#FFFFFF",
+        "dropdown_bg": "#2b2b2b", "dropdown_text": "#ffffff",
+    },
+    "Standard Light": {
+        "bg": "#FFFFFF", "text": "#182B49", "primary": "#FF4B4B",
+        "secondary_bg": "#F0F2F6", "card_text": "#182B49",
+        "border": "#E6E6E6", "sidebar_bg": "#F0F2F6",
+        "sidebar_text": "#182B49", "button_text": "#FFFFFF",
+        "uploader_bg": "#F0F2F6",
+        "sidebar_select_bg": "#F0F2F6", "sidebar_select_text": "#182B49",
+        "segmented_bg": "#E0E0E0", "segmented_text": "#1a1a1a",
+        "dropdown_bg": "#ffffff", "dropdown_text": "#1a1a1a",
+    },
+}
+
+
 def build_theme_css(theme: str, zoom_level: int) -> tuple[str, str]:
     """
     Returns (global_css, theme_css) as strings.
