@@ -32,3 +32,6 @@ docs/
 AGENT.md
 prompts/
 driver/ 
+
+# Local audit trail database
+.audit/

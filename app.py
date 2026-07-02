@@ -1594,6 +1594,14 @@ def render_validation_approaches():
                 if col_a not in key_a_cols and col_b not in key_b_cols
             }
             
+
+            # Build weight_map from per-pair weight settings
+            weight_map = {
+                pair["a"]: pair.get("weight", 1)
+                for pair in complete_pairs
+                if pair.get("weight", 1) > 1
+            }
+
             with st.status("Running comparison...", expanded=True) as status:
                 st.write(" Preparing data...")
                 try:
