@@ -518,6 +518,63 @@ def render_source_uploaders():
                     st.dataframe(st.session_state.df_b.head(5), width="stretch")
 
 
+def render_column_presence_report():
+    """Show column presence comparison when both sources are loaded."""
+    df_a = st.session_state.get("df_a")
+    df_b = st.session_state.get("df_b")
+    if df_a is None or df_b is None:
+        return
+
+    cols_a = set(df_a.columns)
+    cols_b = set(df_b.columns)
+
+    only_a = sorted(cols_a - cols_b)
+    only_b = sorted(cols_b - cols_a)
+    both = sorted(cols_a & cols_b)
+
+    if not only_a and not only_b:
+        return  # identical columns — no need to show
+
+    st.divider()
+    st.subheader("Column Presence")
+
+    col_status = st.columns(3)
+    with col_status[0]:
+        if only_a:
+            st.markdown(
+                f"<div style='color:#FF8800; font-weight:600;'>Only in Source A ({len(only_a)})</div>",
+                unsafe_allow_html=True
+            )
+            for c in only_a:
+                st.caption(f"  {c}")
+        else:
+            st.caption("✅ All Source A columns present in Source B")
+
+    with col_status[1]:
+        if both:
+            st.markdown(
+                f"<div style='color:#00C851; font-weight:600;'>In Both ({len(both)})</div>",
+                unsafe_allow_html=True
+            )
+            st.caption(" ✓ ".join(both[:12]))
+            if len(both) > 12:
+                st.caption(f"... and {len(both) - 12} more")
+        else:
+            st.caption("No common columns — check your sources")
+
+    with col_status[2]:
+        if only_b:
+            st.markdown(
+                f"<div style='color:#FF8800; font-weight:600;'>Only in Source B ({len(only_b)})</div>",
+                unsafe_allow_html=True
+            )
+            for c in only_b:
+                st.caption(f"  {c}")
+        else:
+            st.caption("✅ All Source B columns present in Source A")
+
+
+
 # ============================================================
 # SECTION 6: COLUMN MAPPING
 # ============================================================
@@ -1857,6 +1914,7 @@ def main():
     # Render main content
     render_main_header()
     render_source_uploaders()
+    render_column_presence_report()
     render_column_mapping()
     render_approach_selector()
     render_validation_approaches()
