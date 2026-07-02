@@ -213,7 +213,8 @@ def compare_records(
     column_map: Dict[str, str],
     output_path: Optional[str] = None,
     ask_before_write: bool = False,
-    case_sensitive: bool = False
+    case_sensitive: bool = False,
+    threshold_map: Optional[Dict[str, int]] = None
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
     Row-level comparison of column pairs between two DataFrames (Approach 2).
@@ -405,9 +406,24 @@ def compare_records(
         if coercion_note and coercion_note not in coercion_log:
             coercion_log.append(coercion_note)
 
+        # Get per-pair threshold (default 100 = exact match)
+        pair_threshold = (threshold_map or {}).get(col1, 100)
+
         # Epsilon-aware comparison for numerics
         if pd.api.types.is_numeric_dtype(s1.dtype) and pd.api.types.is_numeric_dtype(s2.dtype):
             mask = ~np.isclose(s1.fillna(0), s2.fillna(0), atol=1e-8) & (s1.notna() | s2.notna())
+            mask = mask | (s1.isna() ^ s2.isna())
+        elif pair_threshold < 100:
+            # Fuzzy string comparison
+            from thefuzz import fuzz as _fuzz
+            s1_str = s1.astype(str).fillna("")
+            s2_str = s2.astype(str).fillna("")
+            mask = pd.Series([
+                _fuzz.token_sort_ratio(str(v1), str(v2)) < pair_threshold
+                if v1 and v2 else False
+                for v1, v2 in zip(s1_str, s2_str)
+            ], index=s1.index)
+            # Also flag missing-value mismatches
             mask = mask | (s1.isna() ^ s2.isna())
         else:
             mask = (s1 != s2) & ~(s1.isna() & s2.isna())

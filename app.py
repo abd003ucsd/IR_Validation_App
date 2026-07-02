@@ -628,11 +628,11 @@ def render_column_mapping():
         # Initialize col_pairs from suggestions
         if suggestions:
             st.session_state.col_pairs = [
-                {"id": str(uuid.uuid4()), "a": col_a, "b": col_b}
+                {"id": str(uuid.uuid4()), "a": col_a, "b": col_b, "threshold": 100}
                 for col_a, col_b in suggestions.items()
             ]
         else:
-            st.session_state.col_pairs = [{"id": str(uuid.uuid4()), "a": "", "b": ""}]
+            st.session_state.col_pairs = [{"id": str(uuid.uuid4()), "a": "", "b": "", "threshold": 100}]
         
         # Store state for change detection
         st.session_state.last_suggestion_state = current_suggestion_state
@@ -709,7 +709,7 @@ def render_column_mapping():
     
     # Add pair button
     if st.button("Add Column Pair"):
-        st.session_state.col_pairs.append({"id": str(uuid.uuid4()), "a": "", "b": ""})
+        st.session_state.col_pairs.append({"id": str(uuid.uuid4()), "a": "", "b": "", "threshold": 100})
         st.rerun()
     
     # ========== COMPOSITE MAPPING BUILDER (APPROACH 3 ONLY) ==========
