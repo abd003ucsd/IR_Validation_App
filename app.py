@@ -37,6 +37,7 @@ from matching_engine import (
 from ui_theme import apply_custom_theme
 
 # Import validation functions from local module
+from audit_log import init_db, save_run, get_recent_runs
 from validation_utils import (
     validate_data,
     compare_records,
@@ -123,6 +124,7 @@ UCOP_GAD_PRESET = {
 
 def init_session_state():
     """Initialize all required session state variables."""
+    init_db()
     # UI State
     if "theme" not in st.session_state:
         # FIX 1: Wrong default theme
@@ -1474,6 +1476,18 @@ def render_validation_approaches():
                         "rel_diff": rel_diff,
                         "coercion_log": coercion_log
                     }
+                    # Audit trail
+                    save_run(
+                        approach=approach,
+                        score=100.0,
+                        total_keys=0,
+                        joined_count=0,
+                        source_a_name=getattr(st.session_state.get("uploader_a"), "name", None),
+                        source_b_name=getattr(st.session_state.get("uploader_b"), "name", None),
+                        key_cols_a=key_a_cols,
+                        key_cols_b=key_b_cols,
+                        column_pairs=complete_pairs,
+                    )
                     if numeric_conversion_applied:
                         st.caption(
                             "Some columns were automatically converted to numeric for comparison."
@@ -1560,6 +1574,25 @@ def render_validation_approaches():
                         "col_map": col_map,
                         "ts": ts
                     }
+                    # Audit trail
+                    missing_in_a_ct = int(results_df[results_df['match_type'] == 'Missing in Source A']['key_df2'].nunique()) if not results_df.empty else 0
+                    missing_in_b_ct = int(results_df[results_df['match_type'] == 'Missing in Source B']['key_df1'].nunique()) if not results_df.empty else 0
+                    mismatch_ct = int(results_df[results_df['col_df1'] != '<ROW MISSING>']['key_df1'].nunique()) if not results_df.empty else 0
+                    score = calculate_match_score(results_df, total_keys)
+                    save_run(
+                        approach=approach,
+                        score=score,
+                        total_keys=total_keys,
+                        joined_count=joined_count,
+                        missing_in_a=missing_in_a_ct,
+                        missing_in_b=missing_in_b_ct,
+                        mismatch_count=mismatch_ct,
+                        source_a_name=getattr(st.session_state.get("uploader_a"), "name", None),
+                        source_b_name=getattr(st.session_state.get("uploader_b"), "name", None),
+                        key_cols_a=key_a_cols,
+                        key_cols_b=key_b_cols,
+                        column_pairs=complete_pairs,
+                    )
                 except Exception as e:
                     st.error(f" Comparison failed: {str(e)}")
                     return
@@ -1655,6 +1688,8 @@ def render_validation_approaches():
             cols_missing = st.columns(2)
             cols_missing[0].metric("Missing in Source A", f"{missing_in_a:,}")
             cols_missing[1].metric("Missing in Source B", f"{missing_in_b:,}")
+
+            render_cross_tabulation(df_a, df_b, results["data"], key_a_cols, key_b_cols)
 
             if results["data"].empty:
                 st.success("No differences found!")
@@ -1764,6 +1799,25 @@ def render_validation_approaches():
                         "comp_map": comp_map,
                         "ts": ts
                     }
+                    # Audit trail
+                    missing_in_a_ct = int(results_df[(results_df['comparison_type'] == 'missing_key') & (results_df['key_df1'] == '<MISSING>')]['key_df2'].nunique()) if not results_df.empty else 0
+                    missing_in_b_ct = int(results_df[(results_df['comparison_type'] == 'missing_key') & (results_df['key_df2'] == '<MISSING>')]['key_df1'].nunique()) if not results_df.empty else 0
+                    mismatch_ct = int(results_df[results_df['col_df1'] != '<ROW MISSING>']['key_df1'].nunique()) if not results_df.empty else 0
+                    score = calculate_match_score(results_df, total_keys)
+                    save_run(
+                        approach=approach,
+                        score=score,
+                        total_keys=total_keys,
+                        joined_count=joined_count,
+                        missing_in_a=missing_in_a_ct,
+                        missing_in_b=missing_in_b_ct,
+                        mismatch_count=mismatch_ct,
+                        source_a_name=getattr(st.session_state.get("uploader_a"), "name", None),
+                        source_b_name=getattr(st.session_state.get("uploader_b"), "name", None),
+                        key_cols_a=key_a_cols,
+                        key_cols_b=key_b_cols,
+                        composite_pairs=composite_pairs,
+                    )
                 except Exception as e:
                     st.error(f" Comparison failed: {str(e)}")
                     return
@@ -1851,6 +1905,8 @@ def render_validation_approaches():
             cols_missing[0].metric("Missing in Source A", f"{missing_in_a:,}")
             cols_missing[1].metric("Missing in Source B", f"{missing_in_b:,}")
 
+            render_cross_tabulation(df_a, df_b, results["data"], key_a_cols, key_b_cols)
+
             if results["data"].empty:
                 st.success("No differences found!")
             else:
@@ -1893,6 +1949,117 @@ def render_validation_approaches():
                 )
 
 
+def render_cross_tabulation(df_a, df_b, results_df, key_a_cols, key_b_cols):
+    """Show cross-tabulation of mismatches grouped by a categorical column."""
+    if results_df is None or results_df.empty:
+        return
+    if df_a is None or df_b is None:
+        return
+
+    # Build synthetic key columns for joining back to original data
+    def _mk_key(df, cols):
+        return df[cols].astype(str).apply("|".join, axis=1).str.strip().str.upper()
+
+    df_a = df_a.copy()
+    df_b = df_b.copy()
+    df_a["_xkey"] = _mk_key(df_a, key_a_cols)
+    df_b["_xkey"] = _mk_key(df_b, key_b_cols)
+
+    # Candidate categorical columns (exclude key cols and high-cardinality columns)
+    a_candidates = [c for c in df_a.columns
+                    if c not in key_a_cols and df_a[c].nunique() < df_a[c].count() * 0.5
+                    and df_a[c].nunique() <= 50 and c != "_xkey"]
+    b_candidates = [c for c in df_b.columns
+                    if c not in key_b_cols and df_b[c].nunique() < df_b[c].count() * 0.5
+                    and df_b[c].nunique() <= 50 and c != "_xkey"]
+
+    if not a_candidates and not b_candidates:
+        return
+
+    with st.expander("Cross-Tabulation", expanded=False):
+        st.caption("Group mismatches by a categorical column to identify problem areas.")
+
+        col_pick_a, col_pick_b = st.columns(2)
+
+        with col_pick_a:
+            group_col_a = st.selectbox(
+                "Group Source A mismatches by",
+                [""] + a_candidates,
+                key="x_tab_a",
+            )
+
+        with col_pick_b:
+            group_col_b = st.selectbox(
+                "Group Source B mismatches by",
+                [""] + b_candidates,
+                key="x_tab_b",
+            )
+
+        if group_col_a or group_col_b:
+            st.divider()
+
+        if group_col_a:
+            a_mismatch_keys = results_df[
+                (results_df["key_df1"] != "<MISSING>")
+            ]["key_df1"].unique()
+            a_merged = df_a[df_a["_xkey"].isin(a_mismatch_keys)][["_xkey", group_col_a]].drop_duplicates()
+            a_tab = a_merged[group_col_a].value_counts().reset_index()
+            a_tab.columns = [group_col_a, "Mismatches"]
+            a_tab["% of Total"] = (a_tab["Mismatches"] / a_tab["Mismatches"].sum() * 100).round(1)
+            st.markdown(f"**Source A — by {group_col_a}**")
+            st.dataframe(a_tab, width="stretch")
+
+        if group_col_b:
+            b_mismatch_keys = results_df[
+                (results_df["key_df2"] != "<MISSING>")
+            ]["key_df2"].unique()
+            b_merged = df_b[df_b["_xkey"].isin(b_mismatch_keys)][["_xkey", group_col_b]].drop_duplicates()
+            b_tab = b_merged[group_col_b].value_counts().reset_index()
+            b_tab.columns = [group_col_b, "Mismatches"]
+            b_tab["% of Total"] = (b_tab["Mismatches"] / b_tab["Mismatches"].sum() * 100).round(1)
+            st.markdown(f"**Source B — by {group_col_b}**")
+            st.dataframe(b_tab, width="stretch")
+
+
+def render_audit_history():
+    """Show audit trail history in a collapsed expander."""
+    try:
+        runs = get_recent_runs(20)
+    except Exception:
+        return  # DB not available
+
+    if not runs:
+        return
+
+    with st.expander("Run History & Audit Trail", expanded=False):
+        st.caption(f"Last {len(runs)} validation runs")
+
+        for run in runs[:5]:  # Show 5 most recent
+            ts = run.get("timestamp", "")[:19].replace("T", " ")
+            approach = run.get("approach", "?")
+            score = run.get("score", 0)
+            a_name = run.get("source_a_name") or "?"
+            b_name = run.get("source_b_name") or "?"
+            total = run.get("total_keys", 0)
+            misses = run.get("mismatch_count", 0)
+
+            box_color = "#00C851" if score >= 95 else "#FF8800" if score >= 80 else "#FF4444"
+            st.markdown(
+                f"<div style='display:flex; align-items:center; gap:1rem; "
+                f"padding:0.5rem; border-bottom:1px solid #444;'>"
+                f"<span style='color:{box_color}; font-weight:700; font-size:1.2rem;'>{score:.0f}%</span>"
+                f"<span style='color:#ccc; font-size:0.85rem;'>{ts}</span>"
+                f"<span style='color:#aaa;'>{approach}</span>"
+                f"<span style='color:#888; font-size:0.8rem;'>{a_name} vs {b_name}</span>"
+                f"<span style='color:#888;'>{total:,} keys, {misses:,} mismatches</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        if len(runs) > 5:
+            st.caption(f"... and {len(runs) - 5} older runs")
+
+
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
@@ -1918,6 +2085,7 @@ def main():
     render_column_mapping()
     render_approach_selector()
     render_validation_approaches()
+    render_audit_history()
 
     # Apply theme and zoom after all UI elements are rendered
     apply_custom_theme()
