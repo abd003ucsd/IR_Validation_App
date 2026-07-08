@@ -17,7 +17,7 @@ Supported file formats:
 - Data: .json, .parquet
 - PDF: .pdf (with table selection)
 """
-
+import json
 import os
 import uuid
 from datetime import datetime
@@ -1628,6 +1628,14 @@ def render_validation_approaches():
                     missing_in_b_ct = int(results_df[results_df['match_type'] == 'Missing in Source B']['key_df1'].nunique()) if not results_df.empty else 0
                     mismatch_ct = int(results_df[results_df['col_df1'] != '<ROW MISSING>']['key_df1'].nunique()) if not results_df.empty else 0
                     score = calculate_match_score(results_df, total_keys)
+                    # Calculate joined_count for audit trail
+                    _mk_join = lambda df_, cols_: df_[cols_].astype(str).apply("|".join, axis=1).str.strip()
+                    norm_a = _mk_join(df_a, key_a_cols)
+                    norm_b = _mk_join(df_b, key_b_cols)
+                    if not st.session_state.case_sensitive_keys:
+                        norm_a = norm_a.str.upper()
+                        norm_b = norm_b.str.upper()
+                    joined_count = len(set(norm_a) & set(norm_b))
                     save_run(
                         approach=approach,
                         score=score,
@@ -1739,7 +1747,6 @@ def render_validation_approaches():
             cols_missing[0].metric("Missing in Source A", f"{missing_in_a:,}")
             cols_missing[1].metric("Missing in Source B", f"{missing_in_b:,}")
 
-            render_sampled_review(results["data"])
             render_sampled_review(results["data"])
             render_cross_tabulation(df_a, df_b, results["data"], key_a_cols, key_b_cols)
 
@@ -1856,6 +1863,14 @@ def render_validation_approaches():
                     missing_in_b_ct = int(results_df[(results_df['comparison_type'] == 'missing_key') & (results_df['key_df2'] == '<MISSING>')]['key_df1'].nunique()) if not results_df.empty else 0
                     mismatch_ct = int(results_df[results_df['col_df1'] != '<ROW MISSING>']['key_df1'].nunique()) if not results_df.empty else 0
                     score = calculate_match_score(results_df, total_keys)
+                    # Calculate joined_count for audit trail
+                    _mk_join = lambda df_, cols_: df_[cols_].astype(str).apply("|".join, axis=1).str.strip()
+                    norm_a = _mk_join(df_a, key_a_cols)
+                    norm_b = _mk_join(df_b, key_b_cols)
+                    if not st.session_state.case_sensitive_keys:
+                        norm_a = norm_a.str.upper()
+                        norm_b = norm_b.str.upper()
+                    joined_count = len(set(norm_a) & set(norm_b))
                     save_run(
                         approach=approach,
                         score=score,
@@ -1958,7 +1973,6 @@ def render_validation_approaches():
             cols_missing[0].metric("Missing in Source A", f"{missing_in_a:,}")
             cols_missing[1].metric("Missing in Source B", f"{missing_in_b:,}")
 
-            render_sampled_review(results["data"])
             render_sampled_review(results["data"])
             render_cross_tabulation(df_a, df_b, results["data"], key_a_cols, key_b_cols)
 
